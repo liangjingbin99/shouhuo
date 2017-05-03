@@ -1,0 +1,433 @@
+
+第12章　动手，经典等价改写让SQL飞
+
+
+12.1　设法减少访问路径
+12.1.1　Case When改造
+实战写法中t表被访问了多次，具体如下：
+drop table t1 purge;
+drop table t2 purge;
+create table t1 as select * from dba_objects ;
+create table t2 as select * from dba_objects ;
+update t2 set status='INVALID' WHERE ROWNUM<=10000;
+update t2 set generated='Y' WHERE ROWNUM<=10000;
+update t2 set temporary='Y' WHERE ROWNUM<=10000;
+update t2 set temporary='M' WHERE temporary<>'Y';
+update t2 set temporary='Q' WHERE temporary<>'Y' or temporary<>'M';
+COMMIT;
+set autotrace traceonly
+set linesize 1000             
+select t1.object_name,
+t1.object_id,
+(select count(*)
+from t2
+where temporary = 'Y'
+and t2.object_id = t1.object_id) CNT_TEMPORARY_Y,
+(select count(*)
+from t2
+where created >=sysdate-365
+and t2.object_id = t1.object_id) CNT_CREATED_NEW,
+(select sum(object_id)
+from t2
+where status <> 'VALUD'
+and t2.object_id = t1.object_id) SUM_OBJID_STATUS_V,
+(select sum(object_id)
+from t2
+where generated = 'Y'
+and t2.object_id = t1.object_id)  SUM_OBJID_GENERATED_Y,
+(select sum(object_id)
+from t2
+where generated = 'M'
+and t2.object_id = t1.object_id)  SUM_OBJID_GENERATED_M,
+(select sum(object_id)
+from t2
+where generated = 'Q'
+and t2.object_id = t1.object_id)  SUM_OBJID_GENERATED_Q
+from t1
+where t1.object_id <= 50;
+脚本12-1　让表被访问多次的低效写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+看看case when改造的写法2，如下：
+with w_t2 as
+(select
+t2.object_id,
+count(case when t2.temporary='Y' then 1 end ) CNT_TEMPORARY_Y,
+count(case when created >=sysdate-365  then 1 end ) CNT_CREATED_NEW,
+sum(case when t2.status<>'VALID' then t2.object_id end ) SUM_OBJID_STATUS_V,
+sum(case when t2.generated = 'Y' then t2.object_id end ) SUM_OBJID_GENERATED_Y,
+sum(case when t2.generated = 'M' then t2.object_id end ) SUM_OBJID_GENERATED_M,
+sum(case when t2.generated = 'Q' then t2.object_id end ) SUM_OBJID_GENERATED_Q
+from  t2
+group by t2.object_id)
+select t1.object_name,t1.object_id,w_t2.* from t1,w_t2
+where t1.object_id=w_t2.object_id
+and t1.object_id<=50;
+脚本12-2　CASE WHEN改造后的高效写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+12.1.2　Rownum分页改写
+写法1：
+drop table test_rownum purge;
+create table test_rownum as select * from dba_objects;
+select count(*) from test_rownum;
+alter session set statistics_level=all ;
+set linesize 1000
+set pagesize 500
+select * from (select t.*,rownum as rn  from test_rownum t) a where a.rn>=1 and a.rn<=10;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+select * from (select t.*,rownum as rn  from test_rownum t) a where a.rn>=1 and a.rn<=10
+
+脚本12-3　Rownum分页的普通写法
+写法2：
+select * from (select t.*,rownum as rn  from test_rownum t where rownum<=10) a where a.rn>=1;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+select * from (select t.*,rownum as rn  from test_rownum t where rownum<=10) a where a.rn>=1
+
+脚本12-4　Rownum分页的高效写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+12.1.3　Hint直接路径改造
+构造环境：
+SET AUTOTRACE OFF
+DROP TABLE T1 PURGE ;
+DROP TABLE T2 PURGE ;
+DROP TABLE T3 PURGE ;
+DROP TABLE T4 PURGE ;
+DROP TABLE T PURGE ;
+CREATE TABLE T1 AS SELECT * FROM DBA_OBJECTS where 1=2;
+CREATE TABLE T2 AS SELECT * FROM DBA_OBJECTS where 1=2;
+CREATE TABLE T3 AS SELECT * FROM DBA_OBJECTS where 1=2;
+CREATE TABLE T4 AS SELECT * FROM DBA_OBJECTS where 1=2;
+CREATE TABLE T AS SELECT * FROM DBA_OBJECTS ;
+INSERT INTO T SELECT * FROM T;
+INSERT INTO T SELECT * FROM T;
+INSERT INTO T SELECT * FROM T;
+INSERT INTO T SELECT * FROM T;
+INSERT INTO T SELECT * FROM T;
+COMMIT;
+alter table T4 nologging;
+alter session enable parallel dml;
+set linesize 1000
+set timing on
+脚本12-5　Hint直接路径改造的环境构造
+
+
+--------------------------------------------------------------------------------------------
+
+
+比较两表插入的速度：
+SQL> insert  into T1 select * from T;
+SQL> insert  /*+append*/ into T2 select * from T;
+脚本12-6　普通插入与直接路径写的性能差异
+
+
+--------------------------------------------------------------------------------------------
+
+12.1.4　只取你所需的列
+环境准备
+drop table t1 cascade constraints purge;
+drop table t2 cascade constraints  purge;
+create table t1 as select * from dba_objects;
+create table t2 as select * from dba_objects where rownum<=10000;
+update t1 set object_id=rownum ;
+update t2 set object_id=rownum ;
+commit;
+create or replace view v_t1_join_t2
+as select t2.object_id,t2.object_name,
+t1.object_type,t1.owner from t1,t2
+where t1.object_id=t2.object_id;
+alter table T1 add constraint
+pk_object_id primary key (OBJECT_ID);
+alter table T2 add constraint
+fk_objecdt_id foreign key (OBJECT_ID) references t1 (OBJECT_ID);
+执行select * from v_t1_join_t2语句，必须要访问t2和t1表，如下：
+SQL> set autotrace traceonly
+SQL> set linesize 1000
+SQL> select * from v_t1_join_t2;
+脚本12-7　普通访问视图的写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+只取部分列后，访问视图有变化
+SQL> select object_id,object_name from v_t1_join_t2;
+脚本12-8　只取部分列后，访问视图有变化
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 只取所需列，索引无须回表
+drop table t purge;
+create table t as select * from dba_objects;
+set linesize 1000
+set autotrace traceonly
+drop index idx_obj_idtp;
+create index idx_obj_idtp on t(object_id,object_type);
+SQL> select * from t where object_id=28;
+脚本12-9　普通的利用索引的查询
+
+
+--------------------------------------------------------------------------------------------
+
+
+利用组合索引消除回表的索引查询
+SQL> select object_id,object_type from t where object_id=28;
+脚本12-10　利用组合索引消除回表的索引查询
+
+--------------------------------------------------------------------------------------------
+
+12.1.5　避免或者减少递归调用
+1. 避免SQL函数调用有啥好处
+具体环境准备如下：
+drop table people purge;
+drop table sex purge;
+create table people (first_name varchar2(200),last_name varchar2(200),sex_id number);
+create table sex (name varchar2(20), sex_id number);
+insert into people (first_name,last_name,sex_id) select object_name,object_type,1 from dba_objects;
+insert into sex (name,sex_id) values ('男',1);
+insert into sex (name,sex_id) values ('女',2);
+insert into sex (name,sex_id) values ('不详',3);
+commit;
+create or replace function get_sex_name(p_id sex.sex_id%type) return sex.name%type is
+v_name sex.name%type;
+begin
+select name
+into v_name
+from sex
+where sex_id=p_id;
+return v_name;
+end;
+/
+脚本12-11　函数调用性能研究的环境准备
+
+--------------------------------------------------------------------------------------------
+
+写法1
+select sex_id,
+first_name||' '||last_name full_name,
+get_sex_name(sex_id) gender
+from people;
+写法2
+select p.sex_id,
+p.first_name||' '||p.last_name full_name,
+sex.name
+from people p, sex
+where sex.sex_id=p.sex_id;
+脚本12-12　函数调用和两表关联两个等价写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+函数调用写法的性能
+set autotrace traceonly  statistics
+select sex_id,
+first_name||' '||last_name full_name,
+get_sex_name(sex_id) gender
+from people;
+脚本12-13　函数调用写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+接下来跟踪写法2：
+select p.sex_id,
+p.first_name||' '||p.last_name full_name,
+sex.name
+from people p, sex
+where sex.sex_id=p.sex_id;
+脚本12-14　两表关联写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 减少SQL函数调用有何思路
+（1）函数写法的位置
+drop table t1 purge;
+drop table t2 purge;
+create table t1 as select * from dba_objects;
+create table t2 as select * from dba_objects;
+update t2 set object_id=rownum;
+commit;
+create or replace function f_deal1(p_name in varchar2)
+return  varchar2 deterministic
+is
+v_name varchar2(200);
+begin
+-- select substr(upper(p_name),1,4)   into v_name from dual;
+v_name:=substr(upper(p_name),1,4);
+return v_name;
+end;
+/
+create or replace function f_deal2(p_name in varchar2)
+return  varchar2 deterministic
+is
+v_name varchar2(200);
+begin
+select substr(upper(p_name),1,4)   into v_name from dual;
+--  v_name:=substr(upper(p_name),1,4);
+return v_name;
+end;
+/
+脚本12-15　构造环境，建函数
+
+
+--------------------------------------------------------------------------------------------
+
+写法1：
+set autotrace traceonly statistics
+set linesize 1000
+select name from (select rownum rn ,f_deal1(t1.object_name) name from t1) where rn<=12;
+脚本12-16　函数调用在汇集结果集之前
+
+
+--------------------------------------------------------------------------------------------
+
+
+写法2：
+select f_deal1(t1.object_name) name from t1 where rownum<=12;
+脚本12-17　函数调用在汇集结果集之后
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）用函数索引优化
+select * from t1 where f_deal2(t1.object_name)='AAAA';
+脚本12-18　未建函数索引的函数调用
+
+
+--------------------------------------------------------------------------------------------
+
+3. 避免使用触发器
+set pagesize 3000;
+set linesize 300;
+set trim on
+--creating table
+drop table t purge;
+create table t(msg_id number(15), user_id number(9), msg varchar2(4000));
+--creating trigger
+create trigger tri_t
+before insert on t
+for each row
+declare
+v_cnt number(1);
+begin
+select count(*)
+into v_cnt
+from t
+where msg_id = :new.msg_id
+and rownum = 1;
+end tri_t;
+/
+脚本12-20　建表触发器
+
+
+--------------------------------------------------------------------------------------------
+
+写法1
+SQL> set timing on
+SQL> --using trigger
+SQL> alter trigger tri_t enable;
+SQL> declare
+2    v_msgid number(15);
+3    v_usrid number(9);
+4  begin
+5    dbms_random.seed(1000000000);
+6    for i in 1 .. 30000 loop
+7      v_usrid := dbms_random.value;
+8      v_msgid := i;
+9      execute immediate 'insert into t (msg_id, user_id,  msg) values (:p1, :p2,:p3)'
+10        using v_msgid, v_usrid,  'msg_' || i;
+11    end loop;
+12  end;
+13  /
+
+
+--------------------------------------------------------------------------------------------
+
+写法2
+SQL> truncate table t;
+SQL> --not using trigger
+SQL> alter trigger tri_t disable;
+SQL> declare
+2    v_msgid number(15);
+3    v_usrid number(9);
+4  begin
+5    dbms_random.seed(1000000000);
+6    for i in 1 .. 30000 loop
+7      v_usrid := dbms_random.value;
+8      v_msgid := i;
+9      execute immediate 'insert into t (msg_id, user_id, msg) values (:p1, :p2, :p3)'
+10        using v_msgid, v_usrid, 'msg_' || i;
+11    end loop;
+12  end;
+13  /
+脚本12-22　触发器失效时的插入性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+12.1.6　ROWID优化应用
+环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+全表扫描访问：
+set linesize 1000
+set autotrace on
+select /*+full(t) */ object_name from t where object_id=2;
+脚本12-23　全表扫描
+索引扫描方式：
+select  object_name from t where object_id=2;
+脚本12-24　索引扫描
+rowid扫描方式：
+select object_name from t where object_id=2 and rowid='AAAdewAAEAAAAUMAAw';
+脚本12-25　rowid扫描
+
+
+--------------------------------------------------------------------------------------------
+
+12.2　设法避免外因影响
+12.2.2　避免子查询的错误执行计划
+select ta.tch_id, ta.flow_id
+from tache pr,
+(select TCH_ID, c.flow_id
+from event_q a, staff_event b, tache c
+where (a.event_type = '2' OR a.event_type = '1')
+and a.event_id = b.event_id
+and (a.flag is null or a.flag = '1')
+and b.staff_id = 1
+and a.content_id = c.tch_id) ta
+where ta.flow_id = pr.sub_flow_id(+)
+and pr.flow_id is null
+
+
+--------------------------------------------------------------------------------------------
+
+改写如下：
+select ta.tch_id, ta.flow_id
+from tache pr,
+(select TCH_ID, c.flow_id,rownum
+from event_q a, staff_event b, tache c
+where (a.event_type = '2' OR a.event_type = '1')
+and a.event_id = b.event_id
+and (a.flag is null or a.flag = '1')
+and b.staff_id = 1
+and a.content_id = c.tch_id) ta
+where ta.flow_id = pr.sub_flow_id(+)
+and pr.flow_id is null  ;
