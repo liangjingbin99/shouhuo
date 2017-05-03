@@ -1,0 +1,162 @@
+第17章 总结与延伸：从勿信讹传到洞若观火
+
+17.1　SQL优化的各个误区
+17.1.1　COUNT(*)与COUNT(列)的传言
+表无索引时，count(*)的性能
+drop table t purge;
+create table t as select * from dba_objects;
+alter table T modify object_id  null;
+update t set object_id =rownum ;
+set timing on
+set linesize 1000
+set autotrace on
+SELECT count(*) from t;
+脚本17-1　表无索引时，count(*)的性能
+
+--------------------------------------------------------------------------------------------
+
+
+表无索引时，count(列)的性能
+select count(object_id) from t;
+脚本17-2　表无索引时，count(列)的性能
+建个索引看看
+create index idx_object_id on t(object_id);
+select count(*) from t;
+脚本17-3　表有索引时，count(*)的性能
+
+--------------------------------------------------------------------------------------------
+
+
+表有索引时，count(列)的性能
+select count(object_id) from t;
+脚本17-4　表有索引时，count(列)的性能
+
+--------------------------------------------------------------------------------------------
+
+
+表有索引且索引列非空时，count(*)的性能
+alter table T modify object_id  not  null;
+select count(*) from t;
+脚本17-5　表有索引且索引列非空时，count(*)的性能
+
+--------------------------------------------------------------------------------------------
+
+
+表有索引且索引列非空时，count(列)的性能
+select count(object_id) from t;
+脚本17-6　表有索引且索引列非空时，count(列)的性能
+
+--------------------------------------------------------------------------------------------
+
+
+17.1.2　谈SQL编写顺序之流言蜚语
+访问两表，顺序无关性能
+drop table tab_big;
+drop table tab_small;
+create table tab_big  as select * from dba_objects where rownum<=30000;
+create table tab_small  as select * from dba_objects where rownum<=10;
+set autotrace traceonly
+set linesize 1000
+set timing on
+select count(*) from tab_big,tab_small   ;
+select count(*) from tab_small,tab_big   ;
+脚本17-7　访问两表，顺序无关性能
+
+--------------------------------------------------------------------------------------------
+
+
+基于规则，访问两表的顺序会影响性能
+select /*+rule*/ count(*) from tab_big,tab_small ;
+select /*+rule*/ count(*) from tab_small,tab_big ;
+脚本17-8　基于规则，访问两表的顺序会影响性能
+
+--------------------------------------------------------------------------------------------
+
+
+17.1.3　IN与EXISTS之争
+分别在Oracle 10g和Oracle 11g执行三种写法
+select * from v$version;
+drop table emp purge;
+drop table dept purge;
+create table emp as select * from scott.emp;
+create table dept as select * from scott.dept;
+set timing on
+set linesize 1000
+set autotrace traceonly
+--写法1
+select * from dept where deptno NOT IN ( select deptno from emp ) ;
+--写法2
+select * from dept where not exists ( select deptno from emp where emp.deptno=dept.deptno) ;
+--写法3
+select * from dept where deptno NOT IN ( select deptno from emp where deptno is not null) and deptno is not null;
+脚本17-9　分别在Oracle 10g和Oracle 11g执行三种写法
+
+--------------------------------------------------------------------------------------------
+
+
+17.2　误区背后的话题扩展
+验证脚本1
+SET SERVEROUTPUT ON
+SET ECHO ON
+---构造出有25个字段的表t
+DROP TABLE t;
+DECLARE
+l_sql VARCHAR2(32767);
+BEGIN
+l_sql := 'CREATE TABLE t (';
+FOR i IN 1..25
+LOOP
+l_sql := l_sql || 'n' || i || ' NUMBER,';
+END LOOP;
+l_sql := l_sql || 'pad VARCHAR2(1000)) PCTFREE 10';
+EXECUTE IMMEDIATE l_sql;
+END;
+/
+----将记录往这个表T中填充
+DECLARE
+l_sql VARCHAR2(32767);
+BEGIN
+l_sql := 'INSERT INTO t SELECT ';
+FOR i IN 1..25
+LOOP
+l_sql := l_sql || '0,';
+END LOOP;
+l_sql := l_sql || 'NULL FROM dual CONNECT BY level <= 10000';
+EXECUTE IMMEDIATE l_sql;
+COMMIT;
+END;
+/
+
+--------------------------------------------------------------------------------------------
+
+验证脚本2
+execute dbms_stats.gather_table_stats(ownname=>user, tabname=>'t')
+SELECT num_rows, blocks FROM user_tables WHERE table_name = 'T';
+--以下动作观察执行速度，比较发现COUNT(*)最快，COUNT(最大列）最慢
+DECLARE
+l_dummy PLS_INTEGER;
+l_start PLS_INTEGER;
+l_stop PLS_INTEGER;
+l_sql VARCHAR2(100);
+BEGIN
+l_start := dbms_utility.get_time;
+FOR j IN 1..1000
+LOOP
+EXECUTE IMMEDIATE 'SELECT count(*) FROM t' INTO l_dummy;
+END LOOP;
+l_stop := dbms_utility.get_time;
+dbms_output.put_line((l_stop-l_start)/100);
+FOR i IN 1..25
+LOOP
+l_sql := 'SELECT count(n' || i || ') FROM t';
+l_start := dbms_utility.get_time;
+FOR j IN 1..1000
+LOOP
+EXECUTE IMMEDIATE l_sql INTO l_dummy;
+END LOOP;
+l_stop := dbms_utility.get_time;
+dbms_output.put_line((l_stop-l_start)/100);
+END LOOP;
+END;
+/
+脚本17-10　访问不同列的性能测试的环境构造
