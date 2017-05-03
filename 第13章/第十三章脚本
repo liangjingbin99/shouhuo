@@ -1,0 +1,993 @@
+
+第13章　动手，过程函数优化让SQL飞
+
+13.1　PL/SQL优化重点
+13.1.1　定义类型的优化
+1. %TYPE
+SQL> drop table   emp cascade constraints purge;
+SQL> create table emp as select * from scott.emp;
+SQL> create or replace
+2   procedure WITHOUT_TYPE is
+3   v_salary number(7,2);
+4   begin
+5   select max(sal)
+6   into v_salary
+7   from emp;
+8  end;
+9  /
+SQL> create or replace
+2   procedure WITH_TYPE is
+3   v_salary emp.sal%type;
+4   begin
+5   select max(sal)
+6   into v_salary
+7   from emp;
+8   end;
+9  /
+SQL>
+SQL> alter table EMP modify sal number(10,2);
+SQL> update EMP set sal = 1000000  where EMPNO = 7369;
+SQL> commit;
+SQL> exec WITH_TYPE;
+SQL> exec WITHOUT_TYPE;
+BEGIN WITHOUT_TYPE; END;
+脚本13-1　Oracle的%TYPE定义方法
+2. %ROWTYPE
+SQL> drop table T purge;
+SQL> drop table T1 purge;
+SQL> create table T (
+2   c1 number,
+3   c2 number );
+SQL> insert into T values (1,2);
+SQL> create table T1 as select * from T;
+SQL> create or replace
+2   procedure WITH_ROWTYPE is
+3   r T%ROWTYPE;
+4   begin
+5   select *
+6   into r
+7   from T
+8   where rownum = 1;
+9
+10   insert into T1
+11   values (r.c1, r.c2);
+12   end WITH_ROWTYPE;
+13  /
+脚本13-2　Oracle的% ROWTYPE定义方法
+
+
+--------------------------------------------------------------------------------------------
+
+
+13.1.2　PL/SQL的集合优化
+ALTER table EMP  add constraint EMP_PK primary key (EMPNO);
+ALTER table DEP  add constraint DEP_PK primary key (DEPNO);
+insert into EMP
+select rownum,
+'Name'||rownum,
+sysdate+rownum/100,
+dbms_random.value(1000,10000),
+--这里范围差异太小误差20%就不容易统计出来
+dbms_random.value(1,50) ---此处和DEP的depno匹配
+from dual
+connect by level <= 5000;
+insert into DEP
+select rownum, 'DEP'||rownum
+from dual
+connect by level <= 50;
+----此处和部门号范围匹配
+create table EMP_STAT (
+ENAME VARCHAR2(20),
+HIREDATE DATE,
+SAL NUMBER(7,2),
+DNAME VARCHAR2(20),
+MIN_SAL VARCHAR2(1) );
+MIN_SAL VARCHAR2(1) );
+脚本13-3　PL/SQL集合优化的环境构造
+
+
+--------------------------------------------------------------------------------------------
+
+
+1. 不断改进算法
+（1）初始写法__游标循环每次取值
+create or replace procedure proc1 is
+v_avg_dep_sal emp.sal%type;
+v_min_dep_sal emp.sal%type;
+v_dname       dep.dname%type;
+begin
+--确定部门员工的平均工资
+for i in (select empno, ename, depno, sal, hiredate from emp) loop
+select avg(sal) into v_avg_dep_sal from emp where depno = i.depno;
+--将平均工资与emp表中的员工进行比较，找到差异在20%以上的记录的部门号，同时找出最低工资
+if abs(i.sal - v_avg_dep_sal) / v_avg_dep_sal > 0.20 then
+select dep.dname, min(emp.sal)
+into v_dname, v_min_dep_sal
+from dep, emp
+where dep.depno = i.depno
+and emp.depno = dep.depno
+group by dname;
+--假如最低工资找到了，就插入EMP_STAT表中， min_sal表示为Y
+if v_min_dep_sal = i.sal then
+insert into emp_stat
+values
+(i.ename, i.hiredate, i.sal, v_dname, 'Y');
+--差异在20%的不是最低工资的，也插入EMP_STAT表中，只是min_sal表示为N
+else
+insert into emp_stat
+values
+(i.ename, i.hiredate, i.sal, v_dname, 'N');
+end if;
+end if;
+end loop;
+commit;
+end proc1;
+/
+脚本13-4　初始写法__游标循环每次取值
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）首次优化__游标循环合并取值
+create or replace procedure proc2 is
+v_avg_dep_sal emp.sal%type;
+v_min_dep_sal emp.sal%type;
+v_dname       dep.dname%type;
+begin
+for i in (select empno, ename, depno, sal, hiredate from emp) loop
+--在获取到平均工资时还同时读取部门名和最低工资，这里合并做事，比之前的性能要高一些。
+select avg(emp.sal), min(emp.sal), dep.dname
+into v_avg_dep_sal, v_min_dep_sal, v_dname
+from dep, emp
+where dep.depno = i.depno
+and emp.depno = dep.depno
+group by dname;
+if abs(i.sal - v_avg_dep_sal) / v_avg_dep_sal > 0.20 then
+if v_min_dep_sal = i.sal then
+insert into emp_stat
+values
+(i.ename, i.hiredate, i.sal, v_dname, 'Y');
+else
+insert into emp_stat
+values
+(i.ename, i.hiredate, i.sal, v_dname, 'N');
+end if;
+end if;
+end loop;
+commit;
+end proc2;
+/
+脚本13-5　首次优化__游标循环合并取值
+
+
+--------------------------------------------------------------------------------------------
+
+
+（3）二次优化__在内存中多次调用
+create or replace procedure proc3 is
+--将平均工资、最低工资、部门名用type来定义成数组保存在内存表（PL/SQL表）中，避免被反复调用
+type dep_sal_details is record(
+avg_dep_sal emp.sal%type,
+min_dep_sal emp.sal%type,
+max_dep_sal emp.sal%type,
+dname       dep.dname%type);
+type dep_sals is table of dep_sal_details index by binary_integer;
+v_dep_sal dep_sals;
+
+begin
+--将部门信息加入内存表（PL/SQL表）中
+for i in (select avg(sal) asal, min(sal) min_sal, dname, dep.depno
+from dep, emp
+where emp.depno = dep.depno
+group by dname, dep.depno) loop
+v_dep_sal(i.depno).avg_dep_sal := i.asal;
+v_dep_sal(i.depno).min_dep_sal := i.min_sal;
+v_dep_sal(i.depno).dname := i.dname;
+end loop;
+---接下来无须访问dep表，从PL/SQL表v_dep_sal中得到数据，如下：
+for each_emp in (select empno, ename, depno, sal, hiredate from emp) loop
+if abs(each_emp.sal - v_dep_sal(each_emp.depno).avg_dep_sal) / v_dep_sal
+(each_emp.depno)
+.avg_dep_sal > 0.20 then
+if v_dep_sal(each_emp.depno).min_dep_sal = each_emp.sal then
+insert into emp_stat
+values
+(each_emp.ename,
+each_emp.hiredate,
+each_emp.sal,
+v_dep_sal(each_emp.depno).dname,
+'Y');
+else
+insert into emp_stat
+values
+(each_emp.ename,
+each_emp.hiredate,
+each_emp.sal,
+v_dep_sal(each_emp.depno).dname,
+'N');
+end if;
+end if;
+end loop;
+commit;
+end proc3;
+/
+脚本13-6　二次优化__在内存中多次调用
+
+
+--------------------------------------------------------------------------------------------
+
+（4）三次优化__分析函数单条搞定
+create or replace procedure proc4 is
+begin
+insert into emp_stat
+select e.empno,
+e.hiredate,
+e.sal,
+dep.dname,
+case when sal > min_sal then'Y' else 'N' end case
+from (select empno,
+hiredate,
+sal,
+depno,
+avg(sal) over(partition by depno) as avg_sal,
+min(sal) over(partition by depno) as min_sal
+from emp) e,
+dep
+where e.depno = dep.depno
+and abs(e.sal - e.avg_sal) / e.avg_sal > 0.20;
+commit;
+end proc4;
+/
+脚本13-7　三次优化__分析函数单条搞定
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 算法改进效果
+SQL> set timing on
+SQL> exec proc1;
+SQL> exec proc2;
+SQL> exec proc3;
+SQL> exec proc4;
+脚本13-8　第1次测试（50部门，5000员工） 
+
+
+--------------------------------------------------------------------------------------------
+
+
+第2次测试
+insert into EMP
+select rownum,
+'Name'||rownum,
+sysdate+rownum/100,
+dbms_random.value(1000,10000),--这里范围差异太小20%之差就不容易统计出来
+dbms_random.value(1,500) ---此处和DEP的depno匹配
+from dual
+connect by level <= 50000;
+insert into DEP
+select rownum, 'DEP'||rownum
+from dual
+connect by level <= 500;
+----此处和部门号范围匹配
+脚本13-9　第2次测试（500部门，50000员工）
+
+--------------------------------------------------------------------------------------------
+
+13.1.3　PL/SQL的游标合并
+drop table t1 cascade constraints purge;
+drop table t2 cascade constraints purge;
+drop table t3 cascade constraints purge;
+set linesize 1000
+set serveroutput on size 10000
+create table t1
+( a int primary key, y char(80) );
+create table t2
+( b int primary key, a references t1, y char(80) );
+create index t2_a_idx on t2(a);
+create table t3
+( c int primary key, b references t2, y char(80) );
+create index t3_b_idx on t3(b);
+insert into t1
+select rownum, 'x'
+from all_objects
+where rownum <= 10000;
+insert into t2
+select rownum, mod(rownum,10000)+1, 'x'
+from all_objects
+where rownum <= 50000;
+insert into t3
+select rownum, mod(rownum,50000)+1, 'x'
+from all_objects;
+脚本13-10　游标合并试验前的环境准备
+
+
+--------------------------------------------------------------------------------------------
+
+写法1
+Create or replace procedure proc_cur1 as
+begin
+for i in 1 .. 100000
+loop
+for a in ( select t1.a, t1.y
+from t1 where t1.a = i )
+loop
+for b in ( select t2.b, t2.a, t2.y
+from t2 where t2.a = a.a )
+loop
+for c in ( select t3.c, t3.b, t3.y
+from t3 where t3.b = b.b )
+loop
+null;
+end loop;
+end loop;
+end loop;
+end loop;
+end;
+/
+脚本13-11　游标未合并前的写法
+
+
+--------------------------------------------------------------------------------------------
+
+写法2
+Create or replace procedure proc_cur2 as
+begin
+for i in 1 .. 100000
+loop
+for x in ( select t1.a t1a, t1.y t1y,
+t2.b t2b, t2.a t2a, t2.y t2y,
+t3.c t3c, t3.b t3b, t3.y t3y
+from t1, t2, t3
+where t1.a = i
+and t2.a (+) = t1.a
+and t3.b (+) = t2.b )
+loop
+null;
+end loop;
+end loop;
+end;
+/
+脚本13-12　游标合并改造的写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+游标合并与否写法的性能差异
+SQL> set timing on
+SQL> exec proc_cur1;
+SQL> exec proc_cur2;
+脚本13-13　游标合并与否写法的性能差异
+
+
+--------------------------------------------------------------------------------------------
+
+
+13.1.4　动态SQL
+1. 动态SQL与绑定变量关系
+set linesize 1000
+set serveroutput on size 100000
+create or replace function get_value_dyn_bind
+( p_empno in number, p_cname in varchar2 ) return varchar2
+as
+l_value  varchar2(4000);
+begin
+execute immediate
+'select ' || p_cname || ' from emp where empno = :x'
+into l_value
+using p_empno; 
+return l_value;
+end get_value_dyn_bind;
+/
+create or replace function get_value_dyn_nobind
+( p_empno in number, p_cname in varchar2 ) return varchar2
+as
+l_value  varchar2(4000);
+begin
+execute immediate
+'select ' || p_cname || ' from emp where empno = '||p_empno
+into l_value; 
+return l_value;
+end get_value_dyn_nobind;
+/
+set linesize 1000
+exec runstats_pkg.rs_start;
+declare
+l_dummy varchar2(30);
+begin
+for i in 1 .. 100
+loop
+for x in ( select empno from emp )
+loop
+l_dummy := get_value_dyn_bind(x.empno, 'ENAME' );
+l_dummy := get_value_dyn_bind(x.empno, 'EMPNO' );
+l_dummy := get_value_dyn_bind(x.empno, 'HIREDATE' );
+end loop;
+end loop;
+end;
+/
+exec runstats_pkg.rs_middle
+declare
+l_dummy varchar2(30);
+begin
+for i in 1 .. 100
+loop
+for x in ( select empno from emp )
+loop
+l_dummy := get_value_dyn_nobind(x.empno, 'ENAME' );
+l_dummy := get_value_dyn_nobind(x.empno, 'EMPNO' );
+l_dummy := get_value_dyn_nobind(x.empno, 'HIREDATE' );
+end loop;
+end loop;
+end;
+/
+set linesize 1000
+exec runstats_pkg.rs_stop(500);
+SQL> exec runstats_pkg.rs_stop(500);
+脚本13-14　动态SQL绑定变量与否的性能差异
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 动态与静态SQL性能差异
+drop table emp cascade constraints  purge;
+create table emp as select * from scott.emp;
+set linesize 1000
+set serveroutput on size 100000
+create or replace function get_value_dyn
+( p_empno in number, p_cname in varchar2 ) return varchar2
+as
+l_value  varchar2(4000);
+begin
+execute immediate
+'select ' || p_cname || ' from emp where empno = :x'
+into l_value
+using p_empno; 
+return l_value;
+end;
+/
+create or replace function get_value_static( p_empno in number, p_cname in varchar2 ) return varchar2
+as
+l_value  varchar2(4000);
+begin
+select decode( upper(p_cname),
+'ENAME', ename,
+'EMPNO', empno,
+'HIREDATE', to_char(hiredate,'yyyymmddhh24miss'))
+into l_value
+from emp
+where empno = p_empno; 
+return l_value;
+end;
+/
+set linesize 1000
+set serveroutput on size 100000
+exec runstats_pkg.rs_start;
+declare
+l_dummy varchar2(30);
+begin
+for i in 1 .. 5000
+loop
+for x in ( select empno from emp )
+loop
+l_dummy := get_value_dyn(x.empno, 'ENAME' );
+l_dummy := get_value_dyn(x.empno, 'EMPNO' );
+l_dummy := get_value_dyn(x.empno, 'HIREDATE' );
+end loop;
+end loop;
+end;
+/
+exec runstats_pkg.rs_middle
+declare
+l_dummy varchar2(30);
+begin
+for i in 1 .. 5000
+loop
+for x in ( select empno from emp )
+loop
+l_dummy := get_value_static(x.empno, 'ENAME' );
+l_dummy := get_value_static(x.empno, 'EMPNO' );
+l_dummy := get_value_static(x.empno, 'HIREDATE' );
+end loop;
+end loop;
+end;
+/
+exec runstats_pkg.rs_stop(500);
+脚本13-15　动态与静态SQL的性能差异
+
+
+--------------------------------------------------------------------------------------------
+
+
+13.1.5　使用10046trace 跟踪PL/SQL
+set linesize 266
+set timing on
+set pagesize 5000
+alter session set events '10046 trace name context  forever,level 12';
+---此处执行你的存储过程、包等。                   
+alter session set events '10046 trace name context off';
+select d.value
+|| '/'
+|| LOWER (RTRIM(i.INSTANCE, CHR(0)))
+|| '_ora_'
+|| p.spid
+|| '.trc' trace_file_name
+from (select p.spid
+from v$mystat m,v$session s, v$process p
+where  m.statistic#=1 and s.sid=m.sid and p.addr=s.paddr) p,
+(select t.INSTANCE
+FROM v$thread t,v$parameter v
+WHERE v.name='thread'
+AND(v.VALUE=0 OR t.thread#=to_number(v.value))) i,
+(select value
+from v$parameter
+where name='user_dump_dest') d;
+脚本13-16　使用10046trace 跟踪PL/SQL
+
+
+--------------------------------------------------------------------------------------------
+
+
+13.2.1　编译无法成功
+CREATE or replace PROCEDURE my_proc as
+BEGIN
+DBMS_LOCK.sleep (300);
+END;
+/
+---------
+CREATE OR REPLACE
+FUNCTION my_func
+RETURN varchar2
+As
+Begin
+DBMS_LOCK.sleep (300);
+Return 'HELLO, WORLD';
+END;
+/
+select my_func from dual;
+--------CREATE OR REPLACE PACKAGE my_pkg as
+Procedure my_proc;
+function my_func RETURN varchar2;
+End;
+/
+CREATE OR REPLACE
+PACKAGE BODY my_pkg as
+Procedure my_proc is
+BEGIN
+NULL;
+END my_proc;
+FUNCTION my_func
+RETURN varchar2 As
+Begin
+Return 'HELLO, WORLD';
+END my_func; 
+End my_pkg;
+/
+exec my_pkg.my_proc ;
+select my_pkg.my_func from dual;
+
+
+--------------------------------------------------------------------------------------------
+
+思路：
+select * from v$access where owner='LJB' and object='MY_PROC' ----126
+SELECT * FROM V$SESSION WHERE SID=126
+ALTER SYSTEM KILL SESSION '126,1967' immediate;
+脚本13-17　PL/SQL编译无法成功时的处理方法
+
+
+--------------------------------------------------------------------------------------------
+
+
+13.2.2　通用脚本分享
+procedure p_rename_001 (p_tab in varchar2)
+as
+/*
+功能：将原表重命名为_yyyymmdd格式的表名
+完善点： 要考虑RENMAE的目标表已存在的情况，先做判断
+*/
+V_CNT_RE_TAB  NUMBER(9) :=0;
+v_sql_p_rename         varchar2(4000);
+begin
+SELECT  COUNT(*)   INTO V_CNT_RE_TAB FROM user_objects where object_name=UPPER(P_ TAB||'_'||YYYYMMDD);
+if V_CNT_RE_TAB=0 then
+v_sql_p_rename:= 'rename '||P_TAB ||' to '||P_TAB||'_'||YYYYMMDD;
+--   DBMS_OUTPUT.PUT_LINE(v_sql_p_rename);--调试使用
+p_insert_log(p_tab,'P_RENAME',v_sql_p_rename,'完成原表的重命名，改为_YYYYMMDD形式',1);
+execute immediate(v_sql_p_rename); --这里无须做判断，rename动作真实完成！如果后续只是为生成脚本而不是真实执行分区操作，最
+后再把这个表RENAME回去！
+ELSE
+RAISE_APPLICATION_ERROR(-20066,'备份表'||P_TAB||'_'||YYYYMMDD||'已存在,请先删除或重命名该备份表后再继续执行！');
+--  DBMS_OUTPUT.PUT_LINE('备份表'||P_TAB||'_'||YYYYMMDD||'已存在');
+end if;
+DBMS_OUTPUT.PUT_LINE('操作步骤1(备份原表)-------将'||p_tab ||' 表RENMAE成 '||p_tab||'_'||YYYYMMDD||'，并删除其约束索引等');
+end p_rename_001;
+脚本13-18　分区改造前的原表重命名 
+
+
+--------------------------------------------------------------------------------------------
+
+
+设想思路2
+procedure p_ctas_002 (p_tab in varchar2,
+p_struct_only  in number,
+p_deal_flag in number,
+p_part_colum in varchar2,
+p_parallel in number default 4,
+p_tablespace IN VARCHAR2)
+as
+/*
+功能：用CREATE TABLE AS SELECT 的方式从RENAME的_yyyymmdd表中新建出一个只有MAXVALUE的初步分区表
+完善点：要考虑并行，nologging 的提速方式，也要考虑最终将NOLOGGING和PARALLEL恢复成正常状态
+*/
+v_sql_p_ctas         varchar2(4000);
+begin
+v_sql_p_ctas:='create table '||p_tab
+||' partition by range ( '||p_part_colum||' ) ('
+|| ' partition P_MAX  values less than (maxvalue))'||
+' nologging parallel 4  tablespace '||p_tablespace||
+' as select /*+parallel(t,'||p_parallel||')*/ *'||
+' from '|| P_TAB||'_'||YYYYMMDD ;
+if p_struct_only=0 then
+v_sql_p_ctas:=v_sql_p_ctas ||' where 1=2';
+else
+v_sql_p_ctas:=v_sql_p_ctas ||' where 1=1';
+end if;
+--DBMS_OUTPUT.PUT_LINE(v_sql_p_ctas);--调试使用
+p_insert_log(p_tab,'p_ctas',v_sql_p_ctas,'完成CTAS建初步分区表',2,1);
+p_if_judge(v_sql_p_ctas,p_deal_flag);
+v_sql_p_ctas:='alter table '|| p_tab ||' logging';
+p_insert_log(p_tab,'p_ctas',v_sql_p_ctas,'将新分区表修改回LOGGING属性',2,2);
+p_if_judge(v_sql_p_ctas,p_deal_flag);
+v_sql_p_ctas:='alter table '|| p_tab || ' noparallel';
+p_insert_log(p_tab,'p_ctas',v_sql_p_ctas,'将新分区表修改回NOPARALLEL属性',2,3);
+p_if_judge(v_sql_p_ctas,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤2(建分区表)-------通过CTAS的方式从 '||p_tab||'_'||YYYYMMDD|| ' 中新建'||p_tab ||'表，完成初步分区改
+造工作');
+end p_ctas_002;
+脚本13-19　用CTAS完成一张仅带MAX分区的新表
+
+
+--------------------------------------------------------------------------------------------
+
+设想思路3
+procedure p_split_part_003 (p_tab in varchar2,
+p_deal_flag in number,
+p_part_nums in number default 24,
+p_tab_tablespace IN VARCHAR2)
+as
+/*
+功能：用CREATE TABLE AS SELECT 的方式新建出一个只有MAXVALUE的初步分区表进行SPLIT，
+按月份进行切分，默认p_part_nums产生24个分区，构造2年的分区表，第一个分区为当前月的
+上一个月
+*/
+v_first_day   date;
+v_next_day    date;
+v_prev_day    date;
+v_sql_p_split_part         varchar2(4000);
+begin
+select to_date(to_char(sysdate, 'yyyymm') || '01', 'yyyymmdd')
+into v_first_day
+from dual;
+for i in 1 .. p_part_nums loop
+select add_months(v_first_day, i) into v_next_day from dual;
+select add_months(v_next_day, -1) into v_prev_day from dual;
+v_sql_p_split_part := 'alter table '||p_tab||' split partition p_MAX at ' ||
+'(to_date(''' || to_char(v_next_day, 'yyyymmdd') ||
+''',''yyyymmdd''))' || 'into (partition PART_' ||
+to_char(v_prev_day, 'yyyymm') || ' tablespace '|| p_tab_tablespace||', partition p_MAX)';
+-- DBMS_OUTPUT.PUT_LINE(v_sql_p_split_part);--调试使用
+p_insert_log(p_tab,'p_split_part',v_sql_p_split_part,'分区表完成分区SPLIT工作',3,i);
+p_if_judge(v_sql_p_split_part,p_deal_flag);
+end loop;
+DBMS_OUTPUT.PUT_LINE('操作步骤3(分区操作)-------对新建的'||p_tab ||'分区表完成分区SPLIT工作');
+end p_split_part_003;
+脚本13-20　把分区新表split成多个分区
+
+
+--------------------------------------------------------------------------------------------
+
+设想思路4
+procedure p_tab_comments_004  (p_tab in varchar2,p_deal_flag in number)
+as
+/*
+功能：从_YYYYMMDD备份表中得到表和字段的注释，为新分区表的表名和字段增加注释
+*/
+v_sql_p_tab_comments         varchar2(4000);
+v_cnt number;
+begin
+select count(*) into v_cnt from user_tab_comments where table_name=UPPER (P_TAB)||'_'||YYYYMMDD AND COMMENTS IS NOT NULL;
+if v_cnt>0 then
+for i in (select * from user_tab_comments where table_name=UPPER(P_TAB)|| '_'||YYYYMMDD AND COMMENTS IS NOT NULL) loop
+v_sql_p_tab_comments:='comment on table '||p_tab||' is '|| ''''||i.COMMENTS||'''';
+-- DBMS_OUTPUT.PUT_LINE(v_sql_p_deal_tab_comments);--调试使用
+p_insert_log(p_tab,'p_deal_comments',v_sql_p_tab_comments,'将新分区表的表的注释加上',4,1);
+p_if_judge(v_sql_p_tab_comments,p_deal_flag);
+end loop;
+DBMS_OUTPUT.PUT_LINE('操作步骤4(表的注释)-------对'||p_tab ||'表增加表名的注释内容');
+ELSE
+DBMS_OUTPUT.PUT_LINE('操作步骤4(表的注释)-------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有表注释!');
+END IF;
+end p_tab_comments_004;
+脚本13-21　补进分区新表的注释
+
+
+--------------------------------------------------------------------------------------------
+
+
+请看代码p_col_comments_005，得到列的注释：
+procedure p_col_comments_005  (p_tab in varchar2,p_deal_flag in number)
+as
+/*
+功能：从_YYYYMMDD备份表中得到表和字段的注释，为新分区表的表名和字段增加注释
+*/
+v_sql_p_col_comments         varchar2(4000);
+v_cnt number;
+begin
+select count(*) into v_cnt from user_col_comments where table_name=UPPER (P_TAB)||'_'||YYYYMMDD AND COMMENTS IS NOT NULL;
+if v_cnt>0 then
+for i in (select * from user_col_comments where table_name=UPPER(P_TAB)||'_' ||YYYYMMDD AND COMMENTS IS NOT NULL) loop
+v_sql_p_col_comments:='comment on column '||p_tab||'.'||i.COLUMN_NAME||' is '|| ''''||i.COMMENTS||'''';
+p_insert_log(p_tab,'p_deal_col_comments',v_sql_p_col_comments,'将新分区表的列的注释加上',5,1);
+p_if_judge(v_sql_p_col_comments,p_deal_flag);
+end loop;
+DBMS_OUTPUT.PUT_LINE('操作步骤5(列的注释)-------对'||p_tab ||'表增加列名及字段的注释内容');
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤5(列的注释)-------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有列注释!');
+end if;
+end p_col_comments_005;
+脚本13-22　补进分区新表所有列的注释
+
+
+--------------------------------------------------------------------------------------------
+
+请看代码p_defau_and_null_006，得到表的列中是否为空的属性：
+procedure p_defau_and_null_006 (p_tab in varchar2,p_deal_flag in number)
+as
+/*
+功能：从_YYYYMMDD备份表中得到原表的DEFAULT值，为新分区表的表名和字段增加DEFAULT值
+*/
+v_sql_defau_and_null        varchar2(4000);
+v_cnt  number;
+begin
+select count(*) into v_cnt  from user_tab_columns where table_name=UPPER(P_TAB)|| '_'||YYYYMMDD and data_default is not null;
+if v_cnt>0 then
+for i in (select * from user_tab_columns where table_name=UPPER(P_TAB)||'_' ||YYYYMMDD and data_default is not null) loop
+v_sql_defau_and_null:='alter table '||p_tab||' modify '||i.COLUMN_NAME ||' default ' ||i.data_default;
+p_insert_log(p_tab,'p_deal_default',v_sql_defau_and_null,'将新分区表的默认值加上',6);
+p_if_judge(v_sql_defau_and_null,p_deal_flag);
+end loop;
+DBMS_OUTPUT.PUT_LINE('操作步骤6(空和默认)-------对'||p_tab ||'表完成默认DEFAULT值的增加');
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤6(空和默认)-------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有DEFAULT或NULL值!');
+end if; 
+end p_defau_and_null_006;
+脚本13-23　补进分区新表所有列的null属性
+
+
+--------------------------------------------------------------------------------------------
+
+
+请看代码p_check_007，得到列的check属性：
+procedure p_check_007 (p_tab in varchar2,p_deal_flag in number)
+as
+/*
+功能：从_YYYYMMDD备份表中得到原表的CHECK值，为新分区表增加CHECK值
+另注：
+user_constraints已经进行了非空的判断，可以略去如下类似的从user_tab_columns获取非空判断的代码编写来判断是否
+for i in (select * from user_tab_columns where table_name=UPPER(P_TAB)||'_' ||YYYYMMDD and nullable='N') loop
+v_sql:='alter table '||p_tab||' modify '||i.COLUMN_NAME ||' not null';
+*/
+v_sql_p_check         varchar2(4000);
+v_cnt number;
+begin
+select count(*) into v_cnt from user_constraints where table_name=UPPER(P_TAB)|| '_'||YYYYMMDD and constraint_type='C';
+if v_cnt>0 then
+for i in (select * from user_constraints where table_name=UPPER(P_TAB)||'_'|| YYYYMMDD and constraint_type='C') loop
+v_sql_p_check :='alter table '||P_TAB||'_'||YYYYMMDD ||' drop constraint ' || I.CONSTRAINT_NAME;
+p_insert_log(p_tab,'p_deal_check',v_sql_p_check ,'将备份出来的原表的CHECK删除',7,1);
+p_if_judge(v_sql_p_check ,p_deal_flag);
+v_sql_p_check :='alter table '||p_tab||' ADD CONSTRAINT '||I.CONSTRAINT_NAME||' CHECK ('||I.SEARCH_CONDITION ||')' ;
+p_insert_log(p_tab,'p_deal_check',v_sql_p_check ,'将新分区表的CHECK加上',7,2);
+p_if_judge(v_sql_p_check ,p_deal_flag);
+end loop;
+DBMS_OUTPUT.PUT_LINE('操作步骤7(check约束)-------对'||p_tab ||'完成CHECK的约束');
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤7(check约束)-----'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有CHECK!');
+end if;    
+end p_check_007;
+脚本13-24　补进分区新表所有列的check约束
+
+
+--------------------------------------------------------------------------------------------
+
+请看代码p_index_008，得到表的索引：
+procedure p_index_008 (p_tab in varchar2,p_deal_flag in number,p_idx_tablespace IN VARCHAR2)
+as
+/*
+功能：从_YYYYMMDD备份表中得到原表的索引信息，为新分区表增加普通索引（唯一和非唯一索引，函数索引暂不考虑），并删除旧表索引
+难点：需要考虑联合索引的情况
+*/
+v_sql_p_normal_idx         varchar2(4000);
+v_cnt number;
+begin
+SELECT count(*) into v_cnt
+from user_indexes
+where table_name = UPPER(P_TAB)||'_'||YYYYMMDD
+and index_type='NORMAL' AND INDEX_NAME NOT IN (SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS);
+if v_cnt>0 then
+for i in
+(
+WITH T AS
+(
+select C.*,I.UNIQUENESS
+from user_ind_columns C
+,(SELECT DISTINCT index_name,UNIQUENESS
+from user_indexes
+where table_name = UPPER(P_TAB)||'_'||YYYYMMDD
+and index_type='NORMAL'
+AND INDEX_NAME NOT IN
+(SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS)
+) i
+where c.index_name = i.index_name
+)
+SELECT INDEX_NAME,TABLE_NAME,UNIQUENESS, MAX(substr(sys_connect_by_path(COLUMN_ NAME, ','), 2)) str ---考虑组合索引的情况
+FROM (SELECT column_name,INDEX_NAME,TABLE_NAME, row_number() over(PARTITION BY INDEX_NAME,TABLE_NAME ORDER BY COLUMN_NAME) rn
+,UNIQUENESS
+FROM T) t
+START WITH rn = 1
+CONNECT BY rn = PRIOR rn + 1
+AND INDEX_NAME = PRIOR INDEX_NAME
+GROUP BY INDEX_NAME,T.TABLE_NAME,UNIQUENESS
+) loop
+v_sql_p_normal_idx:= 'drop index '||i.index_name;
+p_insert_log(p_tab,'p_deal_normal_idx',v_sql_p_normal_idx,'删除原表索引',8,1);
+p_if_judge(v_sql_p_normal_idx,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤8(处理索引)-------将'||i.table_name ||'的'||i.str||'列的索引'||i.index_name||'删除完毕');
+if i.uniqueness='UNIQUE' then
+v_sql_p_normal_idx:='CREATE UNIQUE INDEX ' || i.INDEX_NAME || ' ON '|| p_tab||'('||i.STR||')'||' tablespace '||
+p_idx_tablespace ;
+elsif i.uniqueness='NONUNIQUE' then
+v_sql_p_normal_idx:='CREATE  INDEX ' || i.INDEX_NAME || ' ON '|| p_tab ||' ('||i.STR||')'||' LOCAL tablespace '||
+p_idx_tablespace ;
+end if;
+p_insert_log(p_tab,'p_deal_normal_idx',v_sql_p_normal_idx,'将新分区表的索引加上',8,2);
+p_if_judge(v_sql_p_normal_idx,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤8(处理索引)-------对'||p_tab ||'新分区表'||i.STR||'列增加索引'||i.index_name);
+end loop;
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤8(处理索引)-------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有索引(索引模块并不含主键判断)!');
+end if;
+end p_index_008;
+脚本13-25　补进分区新表的索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+请看代码p_pk_009，得到表的主键：
+procedure p_pk_009 (p_tab in varchar2,p_deal_flag in number,p_idx_tablespace IN VARCHAR2)
+as
+/*
+功能：从_YYYYMMDD备份表中得到原表的主键信息，为新分区表增加主键值，并删除旧表主键
+难点：需要考虑联合主键的情况
+*/
+v_sql_p_pk         varchar2(4000);
+v_cnt              number;
+
+begin
+SELECT count(*) into v_cnt
+from USER_IND_COLUMNS
+where index_name in (select index_name
+from sys.user_constraints t
+WHERE TABLE_NAME =UPPER(P_TAB)||'_'||YYYYMMDD
+and constraint_type = 'P');
+if v_cnt>0 then
+for i in
+(WITH T AS
+(SELECT INDEX_NAME,TABLE_NAME,COLUMN_NAME
+from USER_IND_COLUMNS
+where index_name in (select index_name
+from sys.user_constraints t
+WHERE TABLE_NAME =UPPER(P_TAB)||'_'||YYYYMMDD
+and constraint_type = 'P')
+)
+SELECT INDEX_NAME,TABLE_NAME, MAX(substr(sys_connect_by_path(COLUMN_NAME, ','), 2)) str
+FROM (SELECT  column_name,INDEX_NAME,TABLE_NAME, row_number() over(PARTITION BY INDEX_NAME,TABLE_NAME ORDER BY COLUMN_NAME) rn
+FROM T) t
+START WITH rn = 1
+CONNECT BY rn = PRIOR rn + 1
+AND INDEX_NAME = PRIOR INDEX_NAME
+GROUP BY INDEX_NAME,T.TABLE_NAME
+) loop
+v_sql_p_pk:= 'alter table '||i.table_name||' drop constraint '||i.index_name|| ' cascade';
+p_insert_log(p_tab,'p_deal_pk',v_sql_p_pk,'将备份出来的原表的主键删除',9,1);
+p_if_judge(v_sql_p_pk,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤9(处理主键)-------将备份出来的原表'||i.table_name||'的'||i.str||'列的主键'||i.index_name||'删除完
+毕！'); ---放在FOR循环中效率没问题，因为主键只有一个，只会循环一次
+v_sql_p_pk:='ALTER TABLE '||p_tab||' ADD CONSTRAINT '||I.INDEX_NAME||' PRIMARY KEY ('||I.STR||')' ||' using index tablespace
+'||p_idx_tablespace ;
+p_insert_log(p_tab,'p_deal_pk',v_sql_p_pk,'将新分区表的主键加上',9,2);
+p_if_judge(v_sql_p_pk,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤9(处理主键)-------对'||p_tab ||'表的'||i.str||'列增加主键'||i.index_name); ---放在FOR循环中效率没
+问题，因为主键只有一个，只会循环一次
+end loop;
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤9(处理主键)-------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有主键!');
+end if;
+end p_pk_009;
+脚本13-26　补进分区新表的主键
+
+
+--------------------------------------------------------------------------------------------
+
+
+请看代码p_constraint_010，得到表的
+procedure p_constraint_010 (p_tab in varchar2,p_deal_flag in number)
+as
+/*
+功能：从_YYYYMMDD备份表中得到原表的约束，为新分区表增加约束值，并删除旧表约束
+难点：需要考虑联合外键REFERENCE的情况
+*/
+v_sql_p_constraint         varchar2(4000);
+v_cnt  number;
+begin
+SELECT count(*) into v_cnt  FROM user_constraints where table_name=UPPER(P_TAB)|| '_'||YYYYMMDD AND CONSTRAINT_TYPE='R';
+if v_cnt>0 then
+for i in
+(with t1 as (
+SELECT  /*+no_merge */
+POSITION
+,t.owner,t.constraint_name as constraint_name1,t.table_name as table_name1
+,t.column_name as column_name1  FROM user_cons_columns t where constraint_name in
+(
+SELECT CONSTRAINT_NAME FROM user_constraints where table_name=UPPER(P_TAB) ||'_'||YYYYMMDD AND CONSTRAINT_TYPE='R'
+)
+),
+t2 as (
+SELECT  /*+no_merge */
+t.POSITION
+,c.constraint_name constraint_name1
+,t.constraint_name as constraint_name2,t.table_name as table_name2
+,t.column_name as column_name2
+,MAX(t.POSITION) OVER (PARTITION BY c.constraint_name) MAX_POSITION
+FROM user_cons_columns t
+,user_constraints c
+WHERE c.table_name = UPPER(P_TAB)||'_'||YYYYMMDD
+AND t.constraint_name = c.r_constraint_name
+AND c.constraint_type='R'
+),
+t3 AS (
+SELECT t1.*
+,t2.constraint_name2
+,t2.table_name2
+,t2.column_name2
+,t2.max_position
+FROM t1,t2
+WHERE t1.constraint_name1 = t2.constraint_name1 AND t1.position=t2.position)
+select t3.*,SUBSTR(SYS_CONNECT_BY_PATH(column_name1,','),2) as FK,SUBSTR(SYS_ CONNECT_BY_PATH(column_name2,','),2) AS PK from t3
+WHERE POSITION=MAX_POSITION
+START WITH position=1
+CONNECT BY constraint_name1 = PRIOR constraint_name1
+AND position = PRIOR position+1) loop
+v_sql_p_constraint:= 'alter table '||p_tab||'_'||YYYYMMDD  ||' drop constraint '||i.constraint_name1;
+p_insert_log(p_tab,'p_deal_constraint',v_sql_p_constraint,'删除原表FK外键' ,10,1);
+p_if_judge(v_sql_p_constraint,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤10(处理外键)------将备份出来的'||i.table_name1||'表的'||i.column_name1||'列的外键'||
+i.constraint_name1||'删除完毕!');
+v_sql_p_constraint:= 'alter table ' || p_tab ||' add constraint '||i.constraint_ name1 || ' foreign key ( '
+||i.fk||') references '||i.table_name2|| ' ('||i.pk||' )';
+p_insert_log(p_tab,'p_deal_constraint',v_sql_p_constraint,'将新分区表的外键加上',10,2);
+p_if_judge(v_sql_p_constraint,p_deal_flag);
+DBMS_OUTPUT.PUT_LINE('操作步骤10(处理外键)------对'||p_tab ||'表的'||i.column_ name1||'列增加外键'||i.constraint_name1);
+end loop;
+else
+DBMS_OUTPUT.PUT_LINE('操作步骤10(处理外键)------'||UPPER(P_TAB)||'_'||YYYYMMDD ||'并没有外键!');
+end if;
+end p_constraint_010;
+脚本13-27　补进分区新表的外键及主外键约束
+
+
