@@ -1,0 +1,674 @@
+
+第4章　运筹帷幄——左右SQL执行计划妙招
+
+
+4.2.1　HINT的思路
+1. 子查询应用范围
+环境准备：
+drop table emp purge;
+create table emp as select * from scott.emp;
+create index idx_emp_deptno on emp(deptno);
+create index idx_emp_empno on emp(empno);
+drop table dept purge;
+create table dept as select * from scott.dept;
+create index idx_dept_deptno on dept(deptno);
+
+ 请看如下语句的执行计划：
+set linesize 1000
+set pagesize 2000
+set autotrace traceonly
+with emps as (select deptno,count(*) as cnt  from emp
+               where empno in (7369,7782,7499)group by deptno)
+select dept.dname,emps.cnt 
+ from dept,emps
+ where dept.deptno=emps.deptno; 
+
+（1）控制在所在的查询块内：
+with emps as (select /*+full(emp)*/ deptno,count(*) as cnt 
+               from emp where empno in (7369,7782,7499)
+              group by deptno)
+select /*+full(dept)*/ dept.dname,emps.cnt 
+ from dept,emps
+ where dept.deptno=emps.deptno;
+脚本4-1　hint控制查询块
+
+--------------------------------------------------------------------------------------------
+
+
+（2）全局的hint的别名引用：
+with emps as (select  deptno,count(*) as cnt 
+               from emp
+               where empno in (7369,7782,7499)
+              group by deptno)
+select /*+full(dept) full(emps.emp)*/ dept.dname,emps.cnt 
+ from dept,emps
+ where dept.deptno=emps.deptno;
+脚本4-2　全局的hint的别名引用
+
+（3）用qb_name定义方式：
+with emps as (select  /*+qb_name(sq)*/ deptno,count(*) as cnt 
+               from emp
+               where empno in (7369,7782,7499)
+              group by deptno)
+select /*+qb_name(main) full(@main dept) full(@sq emp)*/ dept.dname,emps.cnt 
+ from dept,emps
+ where dept.deptno=emps.deptno;
+脚本4-3　用qb_name定义方式
+
+
+--------------------------------------------------------------------------------------------
+
+2. HINT无效原因：
+（1）算法没能够支持
+环境准备：
+DROP TABLE t1 CASCADE CONSTRAINTS PURGE; 
+DROP TABLE t2 CASCADE CONSTRAINTS PURGE; 
+CREATE TABLE t1 (
+     id NUMBER NOT NULL,
+     n NUMBER,
+     contents VARCHAR2(4000)
+   ); 
+CREATE TABLE t2 (
+     id NUMBER NOT NULL,
+     t1_id NUMBER NOT NULL,
+     n NUMBER,
+     contents VARCHAR2(4000)
+   ); 
+execute dbms_random.seed(0); 
+INSERT INTO t1
+     SELECT  rownum,  rownum, dbms_random.string('a', 50)
+       FROM dual
+     CONNECT BY level <= 100
+      ORDER BY dbms_random.random; 
+INSERT INTO t2 SELECT rownum, rownum, rownum, dbms_random.string('b', 50) FROM dual CONNECT BY level <= 100000
+    ORDER BY dbms_random.random; 
+COMMIT;
+
+语句1，
+set linesize 1000
+set autotrace traceonly explain
+--语句1
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+  FROM t1, t2
+  WHERE t1.id > t2.t1_id
+  AND t1.n = 19;
+脚本4-4　use_hash的算法不支持不等值连接
+
+--------------------------------------------------------------------------------------------
+
+
+语句2：
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+  FROM t1, t2
+  WHERE t1.id like t2.t1_id
+  AND t1.n = 19;    
+脚本4-5　use_hash的算法不支持LIKE连接
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）组合Hint有矛盾
+Set linesize 1000
+set pagesize 2000
+alter session set statistics_level=all ;
+SELECT /*+ leading(t2) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+脚本4-6　组合Hint有矛盾
+
+
+--------------------------------------------------------------------------------------------
+
+
+（3）依据Hint结果执行会错
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+set linesize 1000
+set pagesize 2000
+explain plan for
+select /*+index(t,idx_object_id)*/ count(*) from t;
+select * from table(dbms_xplan.display());
+脚本4-7　依据Hint结果执行会错
+
+
+
+--------------------------------------------------------------------------------------------
+
+（4）书写出现了错误
+drop table test purge;
+create table test as select * from dba_objects;
+create index idx_test_objid on test(object_id);
+set linesize 1000
+set pagesize 2000
+explain plan for
+select /*+index(test,idx_test_objid)*/ * from test t where object_id>0;
+select * from table(dbms_xplan.display());
+脚本4-8　Hint书写出现了错误
+
+--------------------------------------------------------------------------------------------
+
+
+
+如下两种写法都不会出现问题：
+select /*+index(t,idx_test_objid)*/ * from test t where object_id>0;
+select /*+index(test,idx_test_objid)*/ * from test  where object_id>0;
+
+4.2.2　非HINT方式的执行计划改变
+1. SQL写法的差异
+（1）执行计划SQL写法差异改变之1_with子句
+环境准备：
+drop table t_with;
+CREATE TABLE T_WITH AS SELECT ROWNUM ID, A.* FROM DBA_SOURCE A WHERE ROWNUM < 100001;
+SET autotrace traceonly
+Set linesize 1000
+语句1：
+SELECT ID, NAME FROM T_WITH
+WHERE ID IN 
+(SELECT MAX(ID) FROM T_WITH 
+ UNION ALL
+ SELECT MIN(ID) FROM T_WITH
+ UNION ALL
+ SELECT TRUNC(AVG(ID)) FROM T_WITH);
+语句2：
+WITH AGG AS (SELECT MAX(ID) MAX, MIN(ID) MIN, TRUNC(AVG(ID)) AVG FROM T_WITH)
+ SELECT ID, NAME FROM T_WITH 
+ WHERE ID IN 
+ ( SELECT MAX FROM AGG  UNION ALL  SELECT MIN FROM AGG  UNION ALL  SELECT AVG FROM AGG);
+脚本4-9　执行计划SQL写法差异改变之1_with子句
+
+
+
+--------------------------------------------------------------------------------------------
+
+（2）执行计划SQL写法差异改变之2_insert all
+环境准备：
+drop table t1 purge;
+create table t1 as select  * from dba_objects where 1=2;
+drop table  t2 purge;
+create  table t2 as select * from dba_objects where 1=2;
+drop table t purge;
+create  table t as select * from dba_objects;
+普通的插入语句：
+SQL_ID  d4y6zf9bsqk1b, child number 0
+insert  into  t1 select * from t
+insert  into  t2 select * from t
+
+set linesize 1000
+set pagesize 2000
+set autotrace off
+ALTER SESSION SET statistics_level = all;
+rollabck;
+insert all 
+   into  t1
+   into  t2
+select * from t;
+SQL> SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本4-10　执行计划SQL写法差异改变之2_insert all
+
+
+--------------------------------------------------------------------------------------------
+
+（3）执行计划SQL写法差异改变之3_rownum分页
+环境准备：
+drop table t;
+create table t as select * from dba_objects;
+set linesize 1000
+set pagesize 2000
+set autotrace off
+语句1：
+select * from (select t.*,rownum as rn  from t t) a where a.rn>=1 and a.rn<=10;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));   
+select * from (select t.*,rownum as rn  from t t) a where a.rn>=1 and
+a.rn<=10
+Plan hash value: 1961128543
+
+语句2：
+select * from (select t.*,rownum as rn  from t t where rownum<=10) a where a.rn>=1 ;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));   
+select * from (select t.*,rownum as rn  from t t where rownum<=10) a where a.rn>=1
+Plan hash value: 3593519476
+脚本4-11　执行计划SQL写法差异改变之3_rownum分页
+
+--------------------------------------------------------------------------------------------
+
+
+
+（4）执行计划SQL写法差异改变之4_rownum实体化
+
+select ta.tch_id, ta.flow_id                                
+           from tache pr,                                   
+                (select TCH_ID, c.flow_id                   
+                   from event_q a, staff_event b, tache c   
+                  where (a.event_type = '2' OR a.event_type = '1')
+                    and a.event_id = b.event_id             
+                    and (a.flag is null or a.flag = '1')    
+                    and b.staff_id = 1   
+                    and a.content_id = c.tch_id) ta         
+          where ta.flow_id = pr.sub_flow_id(+)              
+            and pr.flow_id is null 
+
+select ta.tch_id, ta.flow_id                                
+           from tache pr,                                   
+                (select TCH_ID, c.flow_id,rownum            
+                   from event_q a, staff_event b, tache c   
+                   where (a.event_type = '2' OR a.event_type = '1')
+                   and a.event_id = b.event_id             
+                   and (a.flag is null or a.flag = '1')     
+                   and b.staff_id = 1                       
+                   and a.content_id = c.tch_id) ta          
+          where ta.flow_id = pr.sub_flow_id(+)              
+            and pr.flow_id is null
+脚本4-12　执行计划SQL写法差异改变之4_rownum实体化
+
+
+--------------------------------------------------------------------------------------------
+
+（5）执行计划SQL写法差异改变之5_rowid 的影响
+环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create  index idx_object_id on t(object_id);
+set autotrace off
+select rowid from t where object_id=8; 
+ROWID
+-----
+AAAaq2AALAAApOrAAH
+语句1：
+update t set object_name='abc' where object_id=8;
+语句2：
+set autotrace traceonly
+set linesize 1000
+--语句2
+update t set object_name='abc'  where object_id=8 and t.rowid='AAAaq2AALAAApOrAAH';
+脚本4-13　执行计划SQL写法差异改变之5_ rowid 的影响
+
+
+--------------------------------------------------------------------------------------------
+
+
+（6）执行计划SQL写法差异改变之6_缓存结果影响
+环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t  select * from t;
+commit;
+语句1：
+set autotrace  on
+set linesize 1000
+set pagesize 2000
+select  count(*) from t;
+语句2（注，这是连续执行第2次的输出结果）：
+select /*+ result_cache */ count(*) from t;
+脚本4-14　执行计划SQL写法差异改变之6_缓存结果影响
+
+
+
+
+
+（7）执行计划SQL写法差异改变之7_分区条件有无
+环境准备：
+drop table list_part_tab purge;
+--注意，此分区为列表分区
+create table list_part_tab (id number,deal_date date,area_code number,nbr number,building varchar2(4000))
+           partition by list (area_code)
+           (
+           partition p_591 values  (591),
+           partition p_592 values  (592),
+           partition p_593 values  (593),
+           partition p_594 values  (594),
+           partition p_595 values  (595),
+           partition p_596 values  (596),
+           partition p_597 values  (597),
+           partition p_598 values  (598),
+           partition p_599 values  (599),
+           partition p_other values  (DEFAULT)
+           )
+--以下是插入一整年日期随机数和表示福建地区号含义（591到599）的随机数记录，共有10万条，如下：
+insert into list_part_tab (id,deal_date,area_code,nbr,building)
+      select rownum,
+             to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+             ceil(dbms_random.value(590,599)),
+             ceil(dbms_random.value(18900000001,18999999999)),
+             rpad('*',400,'*')
+        from dual
+      connect by rownum <= 100000;
+commit;
+update list_part_tab set building='福州市政府' where area_code=591 and rownum=1;
+commit;
+
+语句1：
+select * from list_part_tab where building='福州市政府';
+语句2：
+select * from list_part_tab where building='福州市政府' and area_code=591;
+脚本4-15　执行计划SQL写法差异改变之7_分区条件有无
+
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 利用设计特性
+（1）执行计划利用设计特性改变之1_分区设计影响
+观察范围分区表的分区消除带来的性能优势。
+set linesize 1000
+set autotrace traceonly
+set timing on
+--语句1（针对分区表）
+select *
+      from range_part_tab
+     where deal_date >= TO_DATE('2015-08-04', 'YYYY-MM-DD')
+       and deal_date <= TO_DATE('2015-08-07', 'YYYY-MM
+脚本4-16　分区表的分区消除特性
+
+比较相同的语句，普通表无法用到利用DEAL_DATE条件进行分区消除的情况：
+select *
+      from norm_tab
+     where deal_date >= TO_DATE('2015-08-04', 'YYYY-MM-DD')
+       and deal_date <= TO_DATE('2015-08-07', 'YYYY-MM-DD') 
+
+（2）执行计划利用设计特性改变之2_Cluster类型
+drop table t;
+CREATE TABLE t
+(  cust_id       number,
+   order_dt      timestamp ,
+   order_number  number,
+   username      varchar2(30),
+   ship_addr     number,
+   bill_addr     number,
+   invoice_num   number
+);
+set linesize 1000
+set pagesize 2000
+set autotrace traceonly 
+variable x number
+--以下是利用有序散列聚族表的方法，发现排序被避免
+--语句1（语句1和接下来的语句2一样，但是两个语句的t表的类型不同）
+select cust_id, order_dt, order_number
+  from t
+ where cust_id = :x
+ order by order_dt;
+
+以下是利用有序散列聚族表的方法，发现排序被避免：
+set autotrace off
+drop table t;
+drop cluster shc;
+CREATE CLUSTER shc
+(
+   cust_id     NUMBER,
+   order_dt    timestamp SORT
+)
+HASHKEYS 10000
+HASH IS cust_id
+SIZE  8192
+/
+CREATE TABLE t
+(  cust_id       number,
+   order_dt      timestamp SORT,
+   order_number  number,
+   username      varchar2(30),
+   ship_addr     number,
+   bill_addr     number,
+   invoice_num   number
+)
+CLUSTER shc ( cust_id, order_dt )
+/
+---开始执行分析
+set autotrace traceonly 
+variable x number
+--以下是利用有序散列聚族表的方法，发现排序被避免
+--语句2（语句2和上面执行过的语句1一样，但是两个语句的t表类型不同）
+select cust_id, order_dt, order_number
+  from t
+ where cust_id = :x
+ order by order_dt;
+脚本4-17　有序散列聚族表消除排序
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+（3）执行计划利用设计特性改变之3_Iot表类型
+环境准备：
+set autotrace off
+drop table heap_addresses purge;
+drop table iot_addresses purge;
+create table heap_addresses
+   (empno    number(10),
+    addr_type varchar2(10),
+    street    varchar2(10),
+    city      varchar2(10),
+    state     varchar2(2),
+    zip       number,
+    primary key (empno)
+   )
+/
+create table iot_addresses
+   (empno    number(10),
+    addr_type varchar2(10),
+    street    varchar2(10),
+    city      varchar2(10),
+    state     varchar2(2),
+    zip       number,
+   primary key (empno)
+   )
+   organization index
+/
+insert into heap_addresses
+   select object_id,'WORK','123street','washington','DC',20123
+   from all_objects;
+insert into iot_addresses
+    select object_id,'WORK','123street','washington','DC',20123
+    from all_objects;
+commit;
+普通表，语句1如下：
+set linesize 1000
+set autotrace traceonly
+--语句1(针对普通表）
+select * from heap_addresses where empno=22;
+接下来针对索引组织表，语句2如下：
+select * from iot_addresses where empno=22;
+脚本4-18　IOT表消除回表
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+（4）执行计划利用设计特性改变之4_物化视图影响
+语句1，普通写法未用到物化视图的特性，如下：
+drop materialized view MV_COUNT_T;
+drop table t purge;
+create table t as  select * from dba_objects;
+set autotrace traceonly
+set linesize 1000
+--语句1（未建过物化视图）
+select COUNT(*) FROM T; 
+语句2，用到物化视图的特性，如下：
+create  materialized view  mv_count_t
+                    build immediate
+                    refresh on commit
+                    enable query rewrite
+                    as
+                    select count(*) FROM T;
+set autotrace traceonly
+set linesize 1000
+--开始执行语句2（语句2本身和语句1没区别，但是建过物化视图）
+select COUNT(*) FROM T; 
+脚本4-19　物化视图改变了访问的表
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+（5）执行计划利用设计特性改变之5_并行度影响
+语句1：
+drop table t;
+create table t as select * from dba_objects;
+set linesize 1000
+set pagesize 2000
+set autotrace off
+ALTER SESSION SET statistics_level = all;
+--语句1
+select count(*) from t;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));   
+select count(*) from t
+语句2：
+select /*+parallel(t,4)*/ count(*) from t;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));   
+语句3（注意这时表的属性被设置成并行度为4）：
+alter table t parallel 4;
+select count(*) from t;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));  
+脚本4-20　表的属性设置为并行，执行计划变化了
+
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+语句4（注意这个no_parallel的hint，该hint可以消除并行特性）：
+select /*+no_parallel*/ count(*) from t;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+select /*+no_parallel*/ count(*) from t
+
+（6）执行计划利用设计特性改变之6_列空值影响
+语句1（表的索引列的属性没有被限制为非空
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+create index idx_object_id on t(object_id);
+set linesize 1000
+set pagesize 2000
+set autotrace traceonly
+--语句1
+select count(*) from t;
+语句2（表的索引列的属性被限制为非空）：
+alter table t modify object_id not null;
+--语句2（语句2和语句1没差别，但是t表的object_id列的属性被设置为不允许空了）
+select count(*) from t;
+脚本4-21　索引列是否允许为空对执行计划的影响 
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+（7）执行计划利用设计特性改变之7_主外键影响
+场景1，普通语句的写法：
+drop table t1 cascade constraints purge;
+drop table t2 cascade constraints  purge;
+create table t1 as select * from dba_objects;
+create table t2 as select * from dba_objects where rownum<=10000;
+update t1 set object_id=rownum ;
+update t2 set object_id=rownum ;
+commit;
+create or replace view v_t1_join_t2 
+as select t2.object_id,t2.object_name,t1.object_type,t1.owner from t1,t2 
+where t1.object_id=t2.object_id;
+set linesize 1000
+set pagesize 2000
+set autotrace traceonly
+--语句1（此时还没有对这两个表建主外键）
+select object_id,object_name from v_t1_join_t2;
+场景2，接下来，为T1表增加一个主键，继续看该语句，看看语句执行计划有啥变化：
+alter table T1 
+add constraint pk_object_id primary key (OBJECT_ID);   
+--场景2（此时已经对这T1表建了主键）
+select object_id,object_name from v_t1_join_t2;
+场景3，继续为T1表加主键后，再为T2表增加一个指向T1表的外键：
+alter table T2 
+add constraint fk_objecdt_id foreign key (OBJECT_ID) references t1 (OBJECT_ID);
+--场景3（此时已经为T2表增加一个指向T1表的外键）
+select object_id,object_name from v_t1_join_t2;
+脚本4-22　主外键对执行计划的影响
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+3. 其他相关手段 
+（1）执行计划改变之其他相关手段1_set_table_stats
+SELECT *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n<=20;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+用set_table_stats的方式来告诉Oracle表的大小情况，如下：
+EXEC  dbms_stats.SET_table_stats(user, 'T1', numrows => 1000  ,numblks => 10);
+EXEC  dbms_stats.SET_table_stats(user, 'T2', numrows => 2000000  ,numblks => 100000);
+set linesize 1000
+set pagesize 2000
+alter session set statistics_level=all ;
+--有的版本数据库需要执行alter system flush shared_pool;才能生效，一般情况下不需要。
+--alter system flush shared_pool;
+SELECT *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n<=20;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本4-23　set_table_stats改变执行计划
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）执行计划改变之其他相关手段2_预估索引效果
+drop table t purge;
+create table t as select * from dba_objects;
+set linesize 300
+explain plan for select * from t where object_id=1;
+select * from table(dbms_xplan.display());
+SQL> explain plan for select * from t where object_id=1;
+已解释。
+SQL> select * from table(dbms_xplan.display());
+
+虚拟索引，我们来测试一下它的效果，如下：
+drop table t purge;
+create table t as select * from dba_objects;
+--创建虚拟索引，首先要将_use_nosegment_indexes的隐含参数设置为true
+alter session set "_use_nosegment_indexes"=true;
+--虚拟索引的创建语法比较简单，实际上就是普通索引语法后面加一个nosegment关键字
+create index ix_t_id on t(object_id) nosegment;
+set linesize 1000
+explain plan for select * from t where object_id=1;
+select * from table(dbms_xplan.display());
+脚本4-24　虚拟索引预估有无必要建索引
+
+
+
+--------------------------------------------------------------------------------------------
+
+
+4.2.3　执行计划的固定
+场景1：
+--首先建测试表
+--环境构造
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+create index idx_object_id on t(object_id);
+set linesize 1000
+set pagesize 2000
+explain plan for select count(*) from t ;
+select * from table(dbms_xplan.display());
+建立大纲，也就是OUTLINE！
+create or replace outline myoutline
+    for category mycategory
+    on 
+ select count(*) from t  ; 
+select category,SQL_text,signature from user_outlines where name='MYOUTLINE' ;
+场景2：
+alter table t modify object_id not null;
+explain plan for select count(*) from t ;
+select * from table(dbms_xplan.display());
+这个语句就不会走索引，如下：
+alter session set use_stored_outlines =mycategory; 
+explain plan for select count(*) from t ;
+select * from table(dbms_xplan.display());
+脚本4-25　执行计划的大纲固定
