@@ -1,0 +1,684 @@
+第9章　且慢，弄清索引之阻碍让SQL飞
+
+2017-04-15 梁 运维小盆友
+9.2.1　索引各种开销
+2. 回表性能取决于聚合因子
+select /*+ index( colocated colocated_pk ) */ * from colocated where x between 20000 and 40
+SELECT * FROM table(dbms_xplan.display_cursor(NULL,NULL,'runstats_last'));
+产生21360个BUFFER：
+select /*+ index( disorganized disorganized_pk ) */* from disorganized  where x between 20000 and 40000;
+SELECT * FROM table(dbms_xplan.display_cursor(NULL,NULL,'runstats_last'));
+select a.table_name,
+a.index_name,
+a.blevel,
+a.leaf_blocks,
+b.num_rows,
+b.blocks,
+a.clustering_factor,
+trunc(a.clustering_factor / b.num_rows,2) cluster_rate
+from user_indexes a, user_tables b
+where a.table_name = b.table_name
+and index_name in ('COLOCATED_PK', 'DISORGANIZED_PK' )
+and a.clustering_factor is not null
+order by cluster_rate desc;
+
+
+--------------------------------------------------------------------------------------------
+
+3. 索引更新方面的开销比较大
+环境搭建：
+drop table t_big purge;
+drop table t purge;
+create table t as select * from dba_objects;
+set autotrace off
+create table t_big as select * from t ;
+insert into  t_big select * from t_big;
+insert into  t_big select * from t_big;
+insert into  t_big select * from t_big;
+insert into  t_big select * from t_big;
+insert into  t_big select * from t_big;
+insert into  t_big select * from t_big;
+commit;
+drop table  t_small purge;
+create table t_small as select * from t where rownum<=1000;
+set timing on
+insert into t_small select * from t_big;
+已创建4684096行。
+已用时间:  00: 00: 28.46
+commit;
+insert into t_big select * from t_big;
+已创建4684096行。
+已用时间:  00: 00: 28.22
+commit;
+
+脚本9-1　无索引，表记录增加，插入不怎么变慢
+
+
+--------------------------------------------------------------------------------------------
+
+
+环境准备
+drop table test1 purge;
+drop table test2 purge;
+drop table test3 purge;
+drop table t purge;
+create table t as select * from dba_objects;
+create table test1 as select * from t;
+create table test2 as select * from t;
+create table test3 as select * from t;
+create index idx_owner on test1(owner);
+create index idx_object_name on test1(object_name);
+create index idx_data_obj_id on test1(data_object_id);
+create index idx_created on test1(created);
+create index idx_last_ddl_time on test1(last_ddl_time);
+create index idx_status on test1(status);
+create index idx_t2_sta on test2(status);
+create index idx_t2_objid on test2(object_id);
+分别往这三张表里插记录：
+SQL> set timing on
+SQL> --语句1(test1表有6个索引）
+SQL> insert into test1 select * from t;
+已创建111128行。
+已用时间:  00: 00: 06.08
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.00
+SQL> --语句2(test2表有2个索引）
+SQL> insert into test2 select * from t;
+已创建111128行。
+已用时间:  00: 00: 03.59
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.00
+SQL> --语句3(test3表有无索引）
+SQL> insert into test3 select * from t;
+已创建111128行。
+已用时间:  00: 00: 00.37
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.0
+
+脚本9-2　有索引的表，记录越多，插入越慢
+
+
+--------------------------------------------------------------------------------------------
+
+
+4. 建索引的过程开销也很大
+（1）建索引过程会产生全表锁
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+commit;
+select sid from v$mystat where rownum=1;
+--12
+set timing on
+create index idx_object_id on t(object_id);
+索引已创建。
+session 2
+sqlplus ljb/ljb
+set linesize 1000
+select sid from v$mystat where rownum=1;
+--134
+--以下执行居然被阻塞，要直至建索引结束后，才能执行
+update t set object_id=99999 where object_id=8;
+可以通过如下方式查看被锁的情况：
+set linesize 1000
+select * from v$lock where sid in (12,134);
+SQL> select * from v$lock where sid in (134,12);
+select  /*+no_merge(a) no_merge(b) */
+(select username from v$session where sid=a.sid) blocker,a.sid, 'is blocking',
+(select username from v$session where sid=b.sid) blockee,b.sid
+from v$lock a,v$lock b
+where a.block=1 and b.request>0
+and a.id1=b.id1
+and a.id2=b.id2;
+脚本9-3　建索引产生锁
+
+
+--------------------------------------------------------------------------------------------
+
+（2）建索引过程会产生全表排序
+set linesize 266
+drop table t purge;
+create table t as select * from dba_objects;
+select t1.name, t1.STATISTIC#, t2.VALUE
+from v$statname t1, v$mystat t2
+where t1.STATISTIC# = t2.STATISTIC#
+and t1.name like '%sort%';
+建索引后，继续观察，发现排序次数sorts (memory)增加了，如下：
+create index idx_object_id on t(object_id);
+select t1.name, t1.STATISTIC#, t2.VALUE
+from v$statname t1, v$mystat t2
+where t1.STATISTIC# = t2.STATISTIC#
+and t1.name like '%sort%';
+脚本9-4　建索引产生排序
+
+
+--------------------------------------------------------------------------------------------
+
+
+9.2.2　索引使用失效
+（2）发生索引列的类型转换
+drop table t_col_type purge;
+create table t_col_type(id varchar2(20),col2 varchar2(20),col3 varchar2(20));
+insert into t_col_type select rownum,'abc','efg' from dual connect by level<=10000;
+commit;
+create index idx_id on t_col_type(id);
+set linesize 1000
+set autotrace traceonly
+
+select * from t_col_type where id=6;
+select * from t_col_type where id='6';
+脚本9-5　索引列的类型转换
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 索引物理失效
+（1）long列调整导致索引失效
+环境准备
+drop table t purge;
+create table t (object_id number,object_name long);
+create index idx_object_id on t(object_id);
+insert into t values (1,'ab');
+commit;
+select t.status,t.index_name from user_indexes t where index_name='IDX_OBJECT_ID';
+接下来将long修改为clob，发现索引失效了，必须要重建索引，如下：
+alter table T modify object_name clob;
+set autotrace off
+select t.status,t.index_name from user_indexes t where index_name='IDX_OBJECT_ID';
+alter index  idx_object_id rebuild;
+set autotrace off
+select t.status,t.index_name from user_indexes t where index_name='IDX_OBJECT_ID'
+脚本9-6　long列调整导致索引失效
+
+
+--------------------------------------------------------------------------------------------
+
+（2）move操作会导致索引失效
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+alter table t modify object_id not null;
+set autotrace off
+insert into t select * from t;
+insert into t select * from t;
+commit;
+create index idx_object_id on t(object_id);
+select index_name,status from user_indexes where index_name='IDX_OBJECT_ID';
+alter table t move;
+select index_name,status from user_indexes where index_name='IDX_OBJECT_ID';
+脚本9-7　move操作导致索引失效
+9.2.3　索引取舍控制
+
+
+--------------------------------------------------------------------------------------------
+
+1. 避免表交叉重复建立索引
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id,object_type);
+set autotrace traceonly
+set linesize 1000
+--以下就能用到索引，因为object_id列是前缀
+select * from t where object_id=19;
+
+脚本9-8　组合索引前缀与单列索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 删除系统从未用到的索引
+环境搭建
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_t_id on t (object_id);
+alter index idx_t_id monitoring usage;
+select * from v$object_usage;
+接下来继续执行一个用索引的查询，然后再观察USED字段，发现索引被用过：
+set autotrace traceonly
+select * from t where object_id=10;
+set autotrace off
+select * from v$object_usage;
+停止对索引的监控，观察v$object_usage状态变化：
+alter index idx_t_id nomonitoring usage;
+脚本9-9　删除系统从未用到的索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+9.3.1　索引的开销
+1. 设置索引并行属性引风波
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+alter table T modify object_id not null;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+commit;
+set timing on
+create index idx_object_id on t(object_id) parallel 8;
+select index_name,degree from user_indexes where table_name='T';
+对应的执行计划如下：
+set linesize 1000
+set autotrace traceonly
+select count(*) from t;
+脚本9-10　索引的属性被设置为并行
+
+
+--------------------------------------------------------------------------------------------
+
+2. 分区表与插入性能的提升
+构造环境，如下：
+--构造分区表，插入数据。
+drop table range_part_tab purge;
+create table range_part_tab (id number,deal_date date,area_code number,nbr1 number,　nbr2 number,nbr3 number,contents varchar2(4000))
+partition by range (deal_date)
+(
+partition p_201501 values less than (TO_DATE('2015-02-01', 'YYYY-MM-DD')),
+partition p_201502 values less than (TO_DATE('2015-03-01', 'YYYY-MM-DD')),
+partition p_201503 values less than (TO_DATE('2015-04-01', 'YYYY-MM-DD')),
+partition p_201504 values less than (TO_DATE('2015-05-01', 'YYYY-MM-DD')),
+partition p_201505 values less than (TO_DATE('2015-06-01', 'YYYY-MM-DD')),
+partition p_201506 values less than (TO_DATE('2015-07-01', 'YYYY-MM-DD')),
+partition p_201507 values less than (TO_DATE('2015-08-01', 'YYYY-MM-DD')),
+partition p_201508 values less than (TO_DATE('2015-09-01', 'YYYY-MM-DD')),
+partition p_201509 values less than (TO_DATE('2015-10-01', 'YYYY-MM-DD')),
+partition p_201510 values less than (TO_DATE('2015-11-01', 'YYYY-MM-DD')),
+partition p_201511 values less than (TO_DATE('2015-12-01', 'YYYY-MM-DD')),
+partition p_201512 values less than (TO_DATE('2016-01-01', 'YYYY-MM-DD')),
+partition p_201601 values less than (TO_DATE('2016-02-01', 'YYYY-MM-DD')),
+partition p_201602 values less than (TO_DATE('2016-03-01', 'YYYY-MM-DD')),
+partition p_201603 values less than (TO_DATE('2016-04-01', 'YYYY-MM-DD')),
+partition p_201604 values less than (TO_DATE('2016-05-01', 'YYYY-MM-DD')),
+partition p_max values less than (maxvalue)
+);
+create index idx_parttab_id   on range_part_tab(id)         local;
+create index idx_parttab_nbr1 on range_part_tab(nbr1)       local;
+create index idx_parttab_nbr2 on range_part_tab(nbr2)       local;
+create index idx_parttab_nbr3 on range_part_tab(nbr3)       local;
+create index idx_parttab_area on range_part_tab(area_code)  local;
+drop table normal_tab purge;
+--接下来建普通表
+create table normal_tab (id number,deal_date date,area_code number,nbr1 number,nbr2 number,nbr3 number,contents varchar2(4000));
+create index idx_tab_id on normal_tab(id) ;
+create index idx_tab_nbr1 on normal_tab(nbr1) ;
+create index idx_tab_nbr2 on normal_tab(nbr2) ;
+create index idx_tab_nbr3 on normal_tab(nbr3) ;
+create index idx_tab_area on normal_tab(area_code) ;
+
+
+--------------------------------------------------------------------------------------------
+
+接下来分别插入，比较性能:
+SQL> set timing on
+SQL> insert into range_part_tab
+2       select rownum,
+3               to_date( to_char(sysdate+60,'J')+TRUNC(DBMS_RANDOM.VALUE(0,60)),'J'),
+4               ceil(dbms_random.value(591,599)),
+5               ceil(dbms_random.value(18900000001,18999999999)),
+6               ceil(dbms_random.value(18900000001,18999999999)),
+7               ceil(dbms_random.value(18900000001,18999999999)),
+8               rpad('*',400,'*')
+9          from dual
+10        connect by rownum <= 400000;
+SQL> insert into normal_tab
+2       select rownum,
+3               to_date( to_char(sysdate+60,'J')+TRUNC(DBMS_RANDOM.VALUE(0,60)),'J'),
+4               ceil(dbms_random.value(591,599)),
+5               ceil(dbms_random.value(18900000001,18999999999)),
+6               ceil(dbms_random.value(18900000001,18999999999)),
+7               ceil(dbms_random.value(18900000001,18999999999)),
+8               rpad('*',400,'*')
+9          from dual
+10        connect by rownum <= 400000;
+脚本9-11　分区表与插入性能的提升
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. 未用online建索引酿大错
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+commit;
+select sid from v$mystat where rownum=1;
+--12
+set timing on
+create index idx_object_id on t(object_id) online;
+索引已创建。
+session 2
+sqlplus ljb/ljb
+set linesize 1000
+select sid from v$mystat where rownum=1;
+--134
+--以下执行居然不会被阻塞
+update t set object_id=99999 where object_id=8;
+
+
+--------------------------------------------------------------------------------------------
+
+接着分析：
+session 3
+set linesize 1000
+SQL> select * from v$lock where sid in (134,12);
+select  /*+no_merge(a) no_merge(b) */
+(select username from v$session where sid=a.sid) blocker,
+a.sid, 'is blocking',
+(select username from v$session where sid=b.sid) blockee,
+b.sid
+from v$lock a,v$lock b
+where a.block=1 and b.request>0
+and a.id1=b.id1
+and a.id2=b.id2;
+脚本9-12　关于online方式建索引
+
+
+--------------------------------------------------------------------------------------------
+
+9.3.2　索引去哪儿了
+1. like与 %间一波三折的故事
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+set autotrace off
+update t set object_id=rownum;
+update t set object_name='AAALJB' where object_id=8;
+update t set object_name='LJBAAA' where object_id=10;
+commit;
+create index idx_object_name on t(object_name);
+SET AUTOTRACE ON
+SET LINESIZE 1000
+select object_name,object_id from t where object_name like 'LJB%';
+脚本9-13　like不能用到索引吗
+
+
+--------------------------------------------------------------------------------------------
+
+like用索引的巧妙例子 ：
+create index idx_reverse_objname on t(reverse(object_name));
+set autotrace on
+select object_name,object_id from t where reverse(object_name) like reverse('%LJB');
+脚本9-14　like用索引的巧妙例子 
+
+
+--------------------------------------------------------------------------------------------
+
+2. move致索引失效的悲催事
+drop table t_p cascade constraints purge;
+drop table t_c cascade constraints purge;
+CREATE TABLE T_P (ID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_P ADD CONSTRAINT  T_P_ID_PK  PRIMARY KEY (ID);
+CREATE TABLE T_C (ID NUMBER, FID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_C ADD CONSTRAINT FK_T_C FOREIGN KEY (FID) REFERENCES T_P (ID);
+INSERT INTO T_P SELECT ROWNUM, TABLE_NAME FROM ALL_TABLES;
+INSERT INTO T_C SELECT ROWNUM, MOD(ROWNUM, 1000) + 1, OBJECT_NAME  FROM ALL_OBJECTS;
+COMMIT;
+CREATE INDEX IND_T_C_FID ON T_C (FID);
+SELECT TABLE_NAME,INDEX_NAME,STATUS FROM USER_INDEXES WHERE INDEX_NAME='IND_T_C_FID';
+--不小心失效了，比如操作了
+ALTER TABLE T_C MOVE;
+SELECT TABLE_NAME,INDEX_NAME,STATUS FROM USER_INDEXES WHERE INDEX_NAME='IND_T_C_FID';
+脚本9-15　move 表导致索引失效
+
+
+--------------------------------------------------------------------------------------------
+
+结果查询性能成这样：
+SET LINESIZE 1000
+SET AUTOTRACE TRACEONLY
+SELECT A.ID, A.NAME, B.NAME FROM T_P A, T_C B WHERE A.ID = B.FID AND A.ID = 880;
+脚本9-16　索引失效后查询性能低下
+
+
+--------------------------------------------------------------------------------------------
+
+查询性能是这样的：
+SELECT A.ID, A.NAME, B.NAME FROM T_P A, T_C B WHERE A.ID = B.FID AND A.ID = 880;
+脚本9-17　索引重建后性能恢复
+
+
+--------------------------------------------------------------------------------------------
+
+3. move 致索引失效引锁等待
+--外键索引性能研究之准备
+drop table t_p cascade constraints purge;
+drop table t_c cascade constraints purge;
+CREATE TABLE T_P (ID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_P ADD CONSTRAINT  T_P_ID_PK  PRIMARY KEY (ID);
+CREATE TABLE T_C (ID NUMBER, FID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_C ADD CONSTRAINT FK_T_C FOREIGN KEY (FID) REFERENCES T_P (ID);
+--以下操作导致外键索引失效
+ALTER TABLE T_C MOVE;
+外键索引删除后，立即有锁相关问题
+--首先开启会话1
+select sid from v$mystat where rownum=1;
+DELETE T_C WHERE ID = 2;
+--接下来开启会话2，也就是开启一个新的连接
+select sid from v$mystat where rownum=1; 
+--然后执行如下操作进行观察
+DELETE T_P WHERE ID = 2000;
+--居然发现卡住半天不动了！
+INSERT INTO T_P SELECT ROWNUM, TABLE_NAME FROM ALL_TABLES;
+INSERT INTO T_C SELECT ROWNUM, MOD(ROWNUM, 1000) + 1, OBJECT_NAME  FROM ALL_OBJECTS;
+COMMIT;
+create index idx_IND_T_C_FID on T_C(FID);
+脚本9-18　外键索引失效导致锁表
+
+
+--------------------------------------------------------------------------------------------
+
+
+4. shrink索引不失效也被弃用
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null;
+alter table t modify object_id not null;
+set autotrace off
+insert into t select * from t;
+insert into t select * from t;
+commit;
+create index idx_object_id on t(object_id);
+set linesize 1000
+set autotrace  on
+select count(*) from t;
+set autotrace off
+delete from t where rownum<=292000;
+commit;
+set autotrace on
+select count(*) from t;
+alter table t enable row movement;
+alter table t shrink space;
+select count(*) from t;
+奇怪，索引去哪儿了？怎么不走索引了？
+set autotrace off
+select index_name,status from user_indexes where index_name='IDX_OBJECT_ID';
+select /*+index(t)*/ count(*) from t;
+脚本9-19　shrink索引不失效也被弃用
+
+
+--------------------------------------------------------------------------------------------
+
+5. 范围查询为何就用不到索引
+--以下语句能用到索引。
+select * from t where id=28;
+--不过奇怪的是，缘何下列语句却用不到索引，索引去哪儿了？
+select * from t where id>=28 and id<=50;
+接下来分析才发现：
+select index_name,index_type from user_indexes where table_name='T';
+脚本9-20　反向键索引与范围查询 
+
+
+--------------------------------------------------------------------------------------------
+
+6. 回收站还原表后的索引故事
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+set autotrace off
+select index_name,status from user_indexes where table_name='T';
+set autotrace traceonly
+set linesize 1000
+select /*+index(t idx_object_id)*/ * from t where object_id=19;
+elect status from user_indexes where index_name='IDX_OBJECT_ID';
+未选定行
+--其实索引并没有丢，只是换了一个名字
+select index_name,status from user_indexes where table_name='T';
+INDEX_NAME                     STATUS
+------------------------------ -------
+BIN$9VPINfhiSnqqKgiI9qMgmw==$0 VALID
+--另外可以重命名回去
+alter index "BIN$Tqzx3kCNTryUkitDNSF9Mw==$0" rename to IDX_OBJECT_ID;
+不过原先用HINT方式写上索引名的也不用担心，Oracle还是会识别回来的，如下：
+SQL> select /*+index(t idx_object_id)*/ * from t where object_id=19;
+脚本9-21　表drop再回收后索引的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+7. 回收站恢复与约束的那点事
+案例的脚本大致构造如下：
+drop table t_p cascade constraints purge;
+drop table t_c cascade constraints purge;
+CREATE TABLE T_P (ID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_P ADD CONSTRAINT  T_P_ID_PK  PRIMARY KEY (ID);
+CREATE TABLE T_C (ID NUMBER, FID NUMBER, NAME VARCHAR2(30));
+ALTER TABLE T_C ADD CONSTRAINT FK_T_C FOREIGN KEY (FID) REFERENCES T_P (ID);
+set autotrace off
+INSERT INTO T_P SELECT ROWNUM, TABLE_NAME FROM ALL_TABLES;
+INSERT INTO T_C SELECT ROWNUM, MOD(ROWNUM, 1000) + 1, OBJECT_NAME  FROM ALL_OBJECTS;
+COMMIT;
+CREATE INDEX IND_T_C_FID ON T_C (FID);
+发现约束关系丢失了。
+Set linesize 1000
+SELECT TABLE_NAME,
+CONSTRAINT_NAME,
+STATUS,
+CONSTRAINT_TYPE,
+R_CONSTRAINT_NAME
+FROM USER_CONSTRAINTS
+WHERE TABLE_NAME = 'T_C';
+---删除表并完成回收站的恢复
+DROP TABLE T_C ;
+FLASHBACK TABLE T_C TO BEFORE  DROP;
+--发现约束关系丢失了
+SELECT TABLE_NAME,
+CONSTRAINT_NAME,
+STATUS,
+CONSTRAINT_TYPE,
+R_CONSTRAINT_NAME
+FROM USER_CONSTRAINTS
+WHERE TABLE_NAME = 'T_C';
+脚本9-22　表drop再回收后约束丢失
+
+
+--------------------------------------------------------------------------------------------
+
+
+8. 看看最典型的时间查询通病
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(created);
+set autotrace traceonly
+set linesize 1000
+select * from t where trunc(created)>=TO_DATE('2013-12-14', 'YYYY-MM-DD')
+and trunc(created)<=TO_DATE('2013-12-15', 'YYYY-MM-DD');
+脚本9-23　时间查询用不上索引的低效写法 
+
+
+--------------------------------------------------------------------------------------------
+
+
+改为如下，立即就用到索引：
+select * from t where created>=TO_DATE('2013-12-14', 'YYYY-MM-DD')
+and created<TO_DATE('2013-12-15', 'YYYY-MM-DD')+1;
+脚本9-24　时间查询用上索引的高效写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+9. 请注意这写法是案例非笑话
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+VARIABLE id NUMBER;
+EXECUTE :id := 8;
+set linesize 1000
+set autotrace traceonly
+select * from t where object_id/2=:id;
+脚本9-25　对列进行运算导致索引无法使用
+
+
+--------------------------------------------------------------------------------------------
+
+
+实际上只有如下写法才可以用到索引：
+select * from t where object_id=:id*2;
+脚本9-26　消除对列进行运算后用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+10. 组合升降序排序索引有玄机
+drop table t purge;
+create table t as select * from dba_objects where object_id is not null ;
+set autotrace off
+insert into t select * from t;
+insert into t select * from t;
+commit;
+create index idx_t on t (owner,object_id);
+alter table t modify owner not null;
+alter table t modify object_id  not null;
+set linesize 1000
+set autotrace traceonly
+--听说order by 列有索引可以消除排序，测试发现，Oracle选择不用索引，排序依然存在，索引去哪儿了？
+select  * from t a order by owner desc ,object_type asc;
+换个思路：
+drop index idx_t;
+create index idx_t on t(owner desc,object_type asc);
+--哦，索引在这，效率果然提高了,代价比未用索引导致排序的代价19133低，是14687。
+select  * from t a order by owner desc ,object_type asc;
+脚本9-27　组合升降索引消除排序
+
+
+--------------------------------------------------------------------------------------------
+
+
+9.3.3　索引的取舍
+以下脚本完成虚拟索引的创建：
+drop table t purge;
+create table t as select * from dba_objects;
+--创建虚拟索引，首先要将_use_nosegment_indexes的隐含参数设置为true
+alter session set "_use_nosegment_indexes"=true;
+--虚拟索引的创建语法比较简单，实际上就是普通索引语法后面加一个nosegment关键字
+create index ix_t_id on t(object_id) nosegment;
+接下来用explain plan for的方式查看是否用到索引：
+explain plan for select * from t where object_id=1;
+select * from table(dbms_xplan.display());
+用虚拟索引来判断索引的取舍
+set autotrace off
+--以下是真实执行计划，显然用不到索引。
+alter session set statistics_level=all;
+select * from t where object_id=1;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本9-28　用虚拟索引来判断索引的取舍
