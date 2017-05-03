@@ -1,0 +1,585 @@
+
+
+第14章　动手，高级写法应用让SQL飞
+
+
+14.2.1　GOURP BY的扩展
+1. ROLLUP（比起简单的分组合计增加小计与合计）
+构造环境
+drop table dept cascade constraints  purge;
+drop table emp  cascade constraints purge;
+create table dept as select * from scott.dept;
+create table emp  as select * from scott.emp;
+
+--------------------------------------------------------------------------------------------
+
+写一个最简单的根据各部门工作岗位进行汇总的工资表，如下：
+SELECT  a.dname,b.job,SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY a.dname,b.job;
+
+--------------------------------------------------------------------------------------------
+
+写法1
+set autotrace on
+select * from (
+SELECT  a.dname,b.job,SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY a.dname,b.job
+UNION ALL
+--实现了部门的小计
+SELECT  a.dname,NULL, SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY a.dname
+UNION ALL
+--实现了所有部门总的合计
+SELECT  NULL,NULL, SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno)
+order by dname;
+脚本14-1　普通的分组聚合写法
+
+--------------------------------------------------------------------------------------------
+
+
+写法2
+set autotrace on
+SELECT  a.dname,b.job, SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY ROLLUP(a.dname,b.job);
+脚本14-2　分组聚合的rollup改写
+
+--------------------------------------------------------------------------------------------
+
+
+增加分组纬度的聚合用rollup轻松完成
+SELECT to_char(b.hiredate,'yyyy') hire_year,a.dname,b.job, SUM(sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP BY ROLLUP(to_char(b.hiredate,'yyyy'),a.dname,b.job);
+脚本14-3　增加分组纬度的聚合用rollup轻松完成
+
+
+--------------------------------------------------------------------------------------------
+
+
+更换纬度次序的聚合用rollup轻松完成
+SELECT  a.dname,b.job, SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY CUBE(a.dname,b.job);
+脚本14-4　更换纬度次序的聚合用rollup轻松完成
+
+--------------------------------------------------------------------------------------------
+
+
+2. CUBE（比rollup粒度更细)
+SELECT  a.dname,b.job, SUM(b.sal) sum_sal
+FROM dept a,emp b
+WHERE a.deptno = b.deptno
+GROUP  BY CUBE(a.dname,b.job);
+
+--------------------------------------------------------------------------------------------
+
+
+14.2.2　INSERT ALL
+1. 无条件插入
+drop table t ;
+drop table t1;
+drop table t2;
+create table t as select object_name,rownum as object_id from dba_objects where rownum<=10;
+create table t1 as select * from t where 1=2;
+create table t2 as select * from t where 1=2;
+set autotrace off
+insert ALL INTO t1(object_name,object_id) into t2(object_name,object_id) select * from t;
+commit;
+select count(*) from t1;
+select count(*) from t2;
+脚本14-5　INSERT无条件插入
+
+--------------------------------------------------------------------------------------------
+
+
+2. 有条件插入
+truncate table t1;
+truncate table t2;
+insert all
+when object_id < 5 then
+into t1(object_name,object_id)
+when object_id >=5 then
+into t2(object_name,object_id)
+
+select * from t;
+commit;
+
+脚本14-6　INSERT有条件插入
+
+--------------------------------------------------------------------------------------------
+
+
+
+truncate table t1;
+truncate table t2;
+--前面等于1的条件被<=5含在内，FIRST就表示前面插入了，后面不会再插入了。
+insert first
+when object_id = 1 then
+into t1(object_name,object_id)
+when object_id <=5 then
+into t2(object_name,object_id)
+select * from t;
+commit;
+脚本14-7　INSERT有条件插入( insert first)
+
+--------------------------------------------------------------------------------------------
+
+
+3. 旋转插入
+构造环境：
+drop table sales_source_data purge;
+create table sales_source_data (
+employee_id number(6),
+week_id number(2),
+sales_mon number(8,2),
+sales_tue number(8,2),
+sales_wed number(8,2),
+sales_thur number(8,2),
+sales_fri number(8,2)
+);
+insert into sales_source_data values (176,6,2000,3000,4000,5000,6000);
+commit;    
+drop table sales_info purge;
+create table sales_info (
+employee_id number(6),
+week number(2),
+sales number(8,2)
+);
+
+行转列插入
+insert all
+into sales_info values(employee_id,week_id,sales_mon)
+into sales_info values(employee_id,week_id,sales_tue)
+into sales_info values(employee_id,week_id,sales_wed)
+into sales_info values(employee_id,week_id,sales_thur)
+into sales_info values(employee_id,week_id,sales_fri)
+select employee_id,week_id,sales_mon,sales_tue,
+sales_wed,sales_thur,sales_fri
+from sales_source_data;
+select * from sales_source_data;
+脚本14-8　INSERT行转列插入
+
+--------------------------------------------------------------------------------------------
+
+14.2.3　MERGE
+1. MERGE有啥用途
+MERGE语句
+MERGE INTO T2
+USING T1
+ON (T1.NAME=T2.NAME)
+WHEN MATCHED THEN
+UPDATE
+SET T2.MONEY=T1.MONEY+T2.MONEY
+WHEN NOT MATCHED THEN
+INSERT
+VALUES (T1.NAME,T1.MONEY);
+脚本14-9　MERGE的传统用法
+
+--------------------------------------------------------------------------------------------
+
+
+2. MERGE灵活之处
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY;
+Done
+脚本14-10　MERGE仅UPDATE目标表
+
+--------------------------------------------------------------------------------------------
+
+
+也可选择仅仅INSERT目标表而不做任何UPDATE动作：
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN NOT MATCHED THEN
+5  INSERT
+6  VALUES (T1.NAME,T1.MONEY);
+Done
+脚本14-11　MERGE仅仅INSERT目标表
+
+--------------------------------------------------------------------------------------------
+
+（2）可对MERGE语句加条件
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  WHERE T1.NAME='A' ---此处表示对MERGE的条件进行过滤
+8  ;
+Done
+脚本14-12　可对MERGE语句加条件
+
+--------------------------------------------------------------------------------------------
+
+（3）可用DELETE子句清除行
+MERGE INTO T2
+USING T1
+ON (T1.NAME=T2.NAME)
+WHEN MATCHED THEN
+UPDATE
+SET T2.MONEY=T1.MONEY+T2.MONEY
+DELETE WHERE (T2.NAME = 'A');
+脚本14-13　MERGE可用DELETE子句清除行
+
+--------------------------------------------------------------------------------------------
+
+
+（4）可采用无条件方式插入
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (1=2)
+4  WHEN NOT MATCHED THEN
+5  INSERT
+6  VALUES (T1.NAME,T1.MONEY);
+Done
+脚本14-14　MERGE可采用无条件方式插入
+
+--------------------------------------------------------------------------------------------
+
+
+
+3. MERGE误区探讨
+（1）无法在源表中获得一组稳定的行
+DROP TABLE T1;
+CREATE TABLE T1 (NAME VARCHAR2(20),MONEY NUMBER);
+INSERT INTO T1 VALUES ('A',10);
+INSERT INTO T1 VALUES ('A',30);
+INSERT INTO T1 VALUES ('B',20);
+DROP TABLE T2;
+CREATE TABLE T2 (NAME VARCHAR2(20),MONEY NUMBER);
+INSERT INTO T2 VALUES ('A',30);
+INSERT INTO T2 VALUES ('C',20);
+COMMIT
+
+--------------------------------------------------------------------------------------------
+
+继续执行如下
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  ;
+脚本14-15　MERGE无法在源表中获得一组稳定的行
+
+--------------------------------------------------------------------------------------------
+
+
+MERGE无法在源表中获稳定行的规避
+SQL> MERGE INTO T2
+2  USING (SELECT NAME,SUM(MONEY) AS MONEY FROM T1 GROUP BY NAME)T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  ;
+Done
+脚本14-16　MERGE无法在源表中获稳定行的规避
+
+--------------------------------------------------------------------------------------------
+
+
+T2表中增加了('A',40)的记录，
+DROP TABLE T1;
+CREATE TABLE T1 (NAME VARCHAR2(20),MONEY NUMBER);
+INSERT INTO T1 VALUES ('A',10);
+INSERT INTO T1 VALUES ('B',20);
+DROP TABLE T2;
+CREATE TABLE T2 (NAME VARCHAR2(20),MONEY NUMBER);
+INSERT INTO T2 VALUES ('A',30);
+INSERT INTO T2 VALUES ('A',40);
+INSERT INTO T2 VALUES ('C',20);
+COMMIT
+
+--------------------------------------------------------------------------------------------
+
+继续执行
+SQL>  MERGE INTO T2
+2      USING T1
+3      ON (T1.NAME=T2.NAME)
+4      WHEN MATCHED THEN
+5      UPDATE
+6      SET T2.MONEY=T1.MONEY+T2.MONEY
+7      ;
+Done
+SQL> COMMIT;
+Commit complete
+
+查看T2表，发现T2表中NAME=A的2条记录都被更新了：
+SQL> SELECT * FROM T2;
+脚本14-17　MERGE中一对多的陷阱
+
+--------------------------------------------------------------------------------------------
+
+
+（2）DELETE子句的WHERE顺序必须在最后
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  DELETE WHERE (T2.NAME = 'A')
+8  WHERE T1.NAME='A';
+/
+改为如下即可
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  WHERE T1.NAME='A'
+8  DELETE WHERE (T2.NAME = 'A')
+9  ;
+Done
+脚本14-18　MERGE中DELETE子句的WHERE顺序
+
+--------------------------------------------------------------------------------------------
+
+
+（3）DELETE 子句只可以删除目标表，而无法删除源表
+SQL> SELECT * FROM T1;
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  DELETE WHERE (T2.NAME = 'A' )
+8  ;
+Done
+SQL> SELECT * FROM T1;
+
+--------------------------------------------------------------------------------------------
+
+
+试验如下：
+Rollback complete
+SQL> MERGE INTO T2
+2  USING T1
+3  ON (T1.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=T1.MONEY+T2.MONEY
+7  DELETE WHERE (T2.NAME = 'A' )
+8  ;
+Done
+SQL> SELECT * FROM T1;
+SQL> SELECT * FROM T2;
+
+脚本14-19　MERGE中DELETE子句不能删除源表
+
+--------------------------------------------------------------------------------------------
+
+（4）更新同一张表的数据,需担心USING的空值
+SQL> SELECT * FROM T2;
+
+根据语法完成如下代码：
+SQL> MERGE INTO T2
+2  USING (SELECT * FROM t2 WHERE NAME='D') T
+3  ON (T.NAME=T2.NAME)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=100
+7  WHEN NOT MATCHED THEN
+8  INSERT
+9  VALUES ('D',200)
+10  ;
+Done
+
+--------------------------------------------------------------------------------------------
+
+查询
+SQL> SELECT * FROM T2;
+
+改造巧妙实现需求：
+SQL> MERGE INTO T2
+2  USING (SELECT COUNT(*) CNT FROM t2 WHERE NAME='D') T
+3  ON (T.CNT<>0)
+4  WHEN MATCHED THEN
+5  UPDATE
+6  SET T2.MONEY=100
+7  WHEN NOT MATCHED THEN
+8  INSERT
+9  VALUES ('D',100)
+10  ;
+Done
+SQL> SELECT * FROM T2;
+脚本14-20　MERGE中USIING无记录的应对
+
+--------------------------------------------------------------------------------------------
+
+4. MERGE经典案例
+（1）案例1——互换值
+drop table test;
+create table test (id number,name varchar2(20));
+insert into test values (1,'a');
+insert into test values (2,'b');
+COMMIT;
+SQL> SELECT * FROM test;
+ID NAME
+
+--------------------------------------------------------------------------------------------
+
+
+代码完成更新：
+SQL> MERGE INTO TEST
+2  USING (SELECT 1 id,(SELECT name FROM test WHERE id=2) name FROM DUAL
+3         UNION ALL
+4         SELECT 2,(SELECT name FROM test WHERE id=1) FROM DUAL
+5         ) t
+6  ON (test.id = t.id)
+7  WHEN MATCHED THEN UPDATE set TEST.name = t.name
+8  ;
+Done
+SQL> SELECT * FROM test;
+脚本14-21　用MERGE完成值的互换更新
+
+--------------------------------------------------------------------------------------------
+
+直接采用如下方式取出结果：
+SQL> rollback;
+Rollback complete
+SQL>
+SQL> WITH T AS
+2  (SELECT 1 id,(SELECT name FROM test WHERE id=2) name FROM DUAL
+3         UNION ALL
+4         SELECT 2,(SELECT name FROM test WHERE id=1) FROM DUAL
+5         )
+6  SELECT test.id,t.name FROM test ,t
+7  WHERE test.id=t.id;
+脚本14-22　只是展现取值互换的写法
+
+--------------------------------------------------------------------------------------------
+
+
+（2）案例2——互换值优化
+更新回原表中：
+SQL> merge into  test using
+2  (
+3  WITH T AS
+4   (SELECT 1 id,(SELECT name FROM test WHERE id=2) name FROM DUAL
+5          UNION ALL
+6          SELECT 2,(SELECT name FROM test WHERE id=1) FROM DUAL
+7          )
+8   SELECT test.id,test.rowid as rn ,t.name FROM test ,t
+9   WHERE test.id=t.id
+10  )      n
+11 on(test.rowid=n.rn)
+12  when matched then  update
+13  set test.name=n.name;
+SQL> SELECT * FROM test;
+脚本14-23　MERGE与ROWID的结合优化
+
+--------------------------------------------------------------------------------------------
+
+（3）案例3——库存更新
+declare
+cursor c1 is
+SELECT art_no,stock
+FROM  tb_fin_art_stock
+WHERE  run_date=to_date('&日期','yyyymmdd')-1  and art_no in (158756);
+t_art tb_fin_art_stock.art_no%type;
+t_stock tb_fin_art_STOCK.stock%type;
+begin
+open c1;
+loop
+        fetch c1 into t_art,t_stock;
+        exit when c1%notfound;
+ update tb_fin_art_stock set stock=t_stock+gor_qty+return_qty-sale_qty+stock_corr+DEL_CORR
+                 WHERE run_date=to_date('&日期','yyyymmdd')
+                        and art_no=t_art;
+        commit;
+end loop;
+close c1;
+end;
+
+MERGE解决库存更新问题
+MERGE INTO tb_fin_art_stock t
+USING (SELECT t.ROWID rid
+,t2.stock+SUM(gor_qty+return_qty-sale_qty+stock_corr+DEL_CORR) OVER(PARTITION BY art_no ORDER BY run_date) AS
+stock
+FROM tb_fin_art_stock t
+,(SELECT art_no,stock FROM tb_fin_art_stock WHERE run_date = lv_start_date-1) t2
+WHERE t.run_date BETWEEN lv_start_date AND lv_end_date
+AND t.art_no = t2.art_no
+) n
+USING (t.ROWID = n.rid)
+WHEN MATCHED THEN UPDATE SET t.stock = n.stock;
+脚本14-24　MERGE解决库存更新问题
+
+--------------------------------------------------------------------------------------------
+
+
+14.2.4　WITH子句
+1. 清晰（结构整齐，预先定义）
+语法：
+with
+alias_name1 as    (subquery1),
+alias_name2 as    (subQuery2),
+…
+alias_nameN as    (subQueryN)
+select col1,col2…… col3
+from alias_name1,alias_name2…,alias_nameN
+如：
+WITH
+Q1 AS (SELECT 3 + 5 S FROM DUAL),
+Q2 AS (SELECT 3 * 5 M FROM DUAL),
+Q3 AS (SELECT S, M, S + M, S * M FROM Q1, Q2)
+SELECT * FROM Q3;
+
+--------------------------------------------------------------------------------------------
+
+2. 高效（一份复制，多次使用）
+构造环境：
+drop table t_with purge;
+CREATE TABLE T_WITH AS SELECT ROWNUM ID, A.* FROM DBA_SOURCE A WHERE ROWNUM < 100001;
+写法1：
+SET autotrace traceonly
+Set linesize 1000
+SELECT ID, NAME FROM T_WITH
+WHERE ID IN
+(SELECT MAX(ID) FROM T_WITH
+UNION ALL
+SELECT MIN(ID) FROM T_WITH
+UNION ALL
+SELECT TRUNC(AVG(ID)) FROM T_WITH
+);
+脚本14-25　非WITH子句的普通写法性能 
+
+--------------------------------------------------------------------------------------------
+
+
+写法2：
+WITH
+AGG AS (SELECT MAX(ID) MAX, MIN(ID) MIN, TRUNC(AVG(ID)) AVG FROM T_WITH)
+SELECT ID, NAME FROM T_WITH
+WHERE ID IN
+(
+SELECT MAX FROM AGG
+UNION ALL
+SELECT MIN FROM AGG
+UNION ALL
+SELECT AVG FROM AGG
+);
+脚本14-26　WITH子句写法的性能 
