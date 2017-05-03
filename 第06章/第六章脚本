@@ -1,0 +1,509 @@
+
+
+第６章　且慢，体验逻辑结构让SQL飞
+
+6.2.1　Block
+1. Block最多能装多少行
+drop table test_block_num purge;
+create table test_block_num (id varchar2(1));
+begin
+for i  in 1..8000 loop
+insert into test_block_num values('a');
+end loop;
+commit;
+end;
+/
+接下来我们通过调用dbms_rowid包来研究块到底能装下多少行数据
+SQL> select f, b, count(*)
+2    from (select dbms_rowid.rowid_relative_fno(rowid) f,
+3                 dbms_rowid.rowid_block_number(rowid) b
+4            from test_block_num)
+5   group by f, b;
+2. Block行迁移的成因与优化
+
+--------------------------------------------------------------------------------------------
+
+行迁移优化前，看看如下语句逻辑读情况：
+SQL> select /*+index(EMPLOYEES,idx_emp_id)*/ * from EMPLOYEES  where employee_id>0;
+行迁移优化后，再看看如下语句逻辑读情况：
+SQL> select /*+index(EMPLOYEES,idx_emp_id)*/ * from EMPLOYEES  where employee_id>0;
+
+--------------------------------------------------------------------------------------------
+
+具体试验步骤如下：
+--- PCTFREE试验准备之建表
+DROP TABLE EMPLOYEES PURGE;
+CREATE TABLE EMPLOYEES AS SELECT * FROM HR.EMPLOYEES ;
+desc EMPLOYEES;
+create index idx_emp_id on employees(employee_id);
+--- PCTFREE试验准备之扩大字段
+alter table EMPLOYEES modify FIRST_NAME VARCHAR2(1000);
+alter table EMPLOYEES modify LAST_NAME  VARCHAR2(1000);
+alter table EMPLOYEES modify EMAIL VARCHAR2(1000);
+alter table EMPLOYEES modify PHONE_NUMBER  VARCHAR2(1000);
+--- PCTFREE试验准备之更新表
+UPDATE EMPLOYEES
+SET FIRST_NAME = LPAD('1', 1000, '*'), LAST_NAME = LPAD('1', 1000, '*'), EMAIL = LPAD('1', 1000, '*'),
+PHONE_NUMBER = LPAD('1', 1000, '*');
+COMMIT;
+---行迁移优化前，先看看该语句逻辑读情况(执行计划及代价都一样，没必要展现了，就展现statistics即可）。
+SET AUTOTRACE traceonly
+set linesize 1000
+select /*+index(EMPLOYEES,idx_emp_id)*/ * from EMPLOYEES  where employee_id>0;
+/
+set autotrace off
+----- 发现存在行迁移的方法。
+--首先建chaind_rows相关表，这是必需的步骤。
+--sqlplus "/ as sysdba"
+sqlplus ljb/ljb
+drop table chained_rows purge;
+@?/rdbms/admin/utlchain.sql
+----以下命令针对EMPLOYEES表和EMPLOYEES_BK做分析，将产生行迁移的记录插入到chained_rows表中
+analyze table EMPLOYEES list chained rows into chained_rows;
+select count(*)  from chained_rows where table_name='EMPLOYEES';
+---以下方法可以去除行迁移
+drop table EMPLOYEES_TMP;
+create table EMPLOYEES_TMP as select * from EMPLOYEES where rowid in (select head_rowid from chained_rows);
+Delete from EMPLOYEES where rowid in (select head_rowid from chained_rows);
+Insert into EMPLOYEES select * from EMPLOYEES_TMP;
+delete from chained_rows ;
+commit;
+analyze table EMPLOYEES list chained rows into chained_rows;
+select count(*)  from chained_rows where table_name='EMPLOYEES';
+--这时的取值一定为0，用这种方法做行迁移消除，肯定是没问题的！
+---行迁移优化后，先看看该语句逻辑读情况(执行计划及代价都一样，没必要展现了，就展现statistics即可）
+SET AUTOTRACE traceonly statistics
+set linesize 1000
+select /*+index(EMPLOYEES,idx_emp_id)*/ * from EMPLOYEES  where employee_id>0;
+/
+脚本6-2　行迁移优化前后的测试脚本
+
+--------------------------------------------------------------------------------------------
+3. Block行链接的成因与优化
+试验如下：
+SQL> analyze table EMPLOYEES list chained rows into chained_rows;
+表已分析。
+SQL> select count(*)  from chained_rows where table_name='EMPLOYEES';
+COUNT(*)
+----------
+107
+
+SQL> --行链接只有通过加大BLOCK块的方式才可以避免，如下：
+SQL> DROP TABLE EMPLOYEES_BK PURGE;
+表已删除。
+SQL> CREATE TABLE EMPLOYEES_BK TABLESPACE TBS_LJB_16K AS SELECT * FROM EMPLOYEES;
+表已创建。
+SQL> delete from chained_rows ;
+已删除107行。
+SQL> commit;
+提交完成。
+SQL> analyze table EMPLOYEES_BK list chained rows into chained_rows;
+表已分析。
+SQL> select count(*)  from chained_rows where table_name='EMPLOYEES_BK';
+COUNT(*)
+----------
+0
+
+脚本6-3　行链接消除的试验
+
+--------------------------------------------------------------------------------------------
+
+6.2.2　Segment与extent
+试验如下：
+SQL> drop table t purge;
+表已删除。
+SQL> create table t tablespace tbs_ljb as select * from dba_objects where rownum=1 ;
+表已创建。
+SQL> col segment_name format a15
+SQL> col segment_type format a10
+SQL> col tablespace_name format a20
+SQL> col blocks  format 9999
+SQL> col extents format 9999
+SQL> select segment_name,
+2         segment_type,
+3         tablespace_name,
+4         blocks,extents,
+5         bytes/1024/1024
+6  from user_segments  where segment_name = 'T';
+SQL> select count(*) from   user_extents  WHERE segment_name='T';
+COUNT(*)
+----------
+1
+SQL> ---建一个索引IDX_OBJ_ID就产生了索引段，IDX_OBJ_ID段(SEGMENT)和表的情况类似，如下：
+SQL> create index idx_obj_id on t(object_id);
+索引已创建。
+SQL> select segment_name,
+2         segment_type,
+3         tablespace_name,
+4         blocks,
+5         extents,
+6         bytes/1024/1024
+7  from user_segments
+8  where segment_name = 'IDX_OBJ_ID';
+脚本6-4　体会segment与extent的试验
+
+--------------------------------------------------------------------------------------------
+
+体会Extents及Blocks的增多
+SQL> insert into t select * from dba_objects ;
+已创建72882行。
+SQL> commit;
+提交完成。
+SQL> ---随着T表数据不断增加，区(EXTENT)及块（BLOCK）的个数也不断增多。如下：
+SQL> select segment_name,
+2         segment_type,
+3         tablespace_name,
+4         blocks,
+5         extents,bytes/1024/1024
+6  from user_segments
+7  where segment_name = 'T';
+SQL> ---随着IDX_OBJ_ID不断增大，区(EXTENT)及块（BLOCK）的个数也不断增多。如下：
+SQL> select segment_name,
+2         segment_type,
+3         tablespace_name,
+4         blocks,
+5         extents,
+6         bytes/1024/1024
+7  from user_segments
+8  where segment_name = 'IDX_OBJ_ID';
+脚本6-5　体会Extents及Blocks的增多
+
+--------------------------------------------------------------------------------------------
+
+6.2.3　Tablespace
+查看表空间的总体情况：
+SQL>  SELECT A.TABLESPACE_NAME "表空间名",
+2         A.TOTAL_SPACE "总空间(G)",
+3         NVL(B.FREE_SPACE, 0) "剩余空间(G)",
+4         A.TOTAL_SPACE - NVL(B.FREE_SPACE, 0) "使用空间(G)",
+5         CASE WHEN A.TOTAL_SPACE=0 THEN 0 ELSE trunc(NVL(B.FREE_SPACE, 0) / A.TOTAL_SPACE * 100, 2) END "剩余百分比%" --避免分母为0
+6    FROM (SELECT TABLESPACE_NAME, trunc(SUM(BYTES) / 1024 / 1024/1024 ,2) TOTAL_SPACE
+7            FROM DBA_DATA_FILES
+8           GROUP BY TABLESPACE_NAME) A,
+9         (SELECT TABLESPACE_NAME, trunc(SUM(BYTES / 1024 / 1024/1024  ),2) FREE_SPACE
+10            FROM DBA_FREE_SPACE
+11           GROUP BY TABLESPACE_NAME) B
+12   WHERE A.TABLESPACE_NAME = B.TABLESPACE_NAME(+)
+13   ORDER BY 5;
+脚本6-6　查看表空间大小
+
+--------------------------------------------------------------------------------------------
+
+6.2.4　rowid
+drop table t purge;
+create table t as select * from dba_objects;
+select rowid from t where rownum=1;
+ROWID
+------------------
+AAAYPJAAQAAATNDAAA
+--以下可定位该行具体在哪个对象、文件、块、行（注：rowid是64进制的）
+data object number=AAAYPJ
+file              =AAQ
+block             =AAATND
+row               =AAA
+select dbms_rowid.rowid_object('AAAYPJAAQAAATNDAAA') data_object_id#,
+dbms_rowid.rowid_relative_fno('AAAYPJAAQAAATNDAAA') rfile#,
+dbms_rowid.rowid_block_number('AAAYPJAAQAAATNDAAA') block#,
+dbms_rowid.rowid_row_number('AAAYPJAAQAAATNDAAA') row#
+from dual;
+select owner,object_name from dba_objects where object_id=99273;
+select file_name,tablespace_name from dba_data_files where file_id=16;
+脚本6-7　对rowid的体会与实践
+
+--------------------------------------------------------------------------------------------
+
+6.3　相关优化案例分析
+6.3.1　块的相关案例
+环境准备
+--启动大小为2KB的块新建表空间(Windows下只能使用2KB、4KB、8KB和16KB)
+alter system set db_2k_cache_size=100M;
+drop tablespace tbs_ljb_2k including contents and datafiles;
+create tablespace TBS_LJB_2k
+blocksize 2K
+datafile  'D:\ORACLE\ORADATA\TEST11G\TBS_LJB_2K_01.DBF' size 100M
+autoextend on
+extent management local
+segment space management auto;
+create table t_2k tablespace tbs_ljb_2k as select * from dba_objects;
+--启动大小为4KB的块新建表空间
+alter system set db_4k_cache_size=100M;
+drop tablespace tbs_ljb_4k including contents and datafiles;
+create tablespace TBS_LJB_4k
+blocksize 4K
+datafile  'D:\ORACLE\ORADATA\TEST11G\TBS_LJB_4K_01.DBF' size 100M
+autoextend on
+extent management local
+segment space management auto;
+create table t_4k tablespace tbs_ljb_4k as select * from dba_objects;
+--启动大小为8KB 的块新建表空间(默认就是8KB)
+drop table t_8k purge;
+create table t_8k as select * from dba_objects;
+--启动大小为16KB的块新建表空间
+alter system set db_16k_cache_size=100M;
+drop tablespace tbs_ljb_16k including contents and datafiles;
+create tablespace TBS_LJB_16k
+blocksize 16K
+datafile  'D:\ORACLE\ORADATA\TEST11G\TBS_LJB_16K_01.DBF' size 100M
+autoextend on
+extent management local
+segment space management auto;
+create table t_16k tablespace tbs_ljb_16k as select * from dba_objects;
+脚本6-8　构造4个BLOCK大小不同的表空间
+
+--------------------------------------------------------------------------------------------
+
+BLOCK为2KB的SQL性能
+set autotrace on
+SQL> select count(*) from t_2k;
+脚本6-9　BLOCK为2KB的SQL性能
+
+BLOCK为4KB的SQL性能
+set autotrace on
+SQL> select count(*) from t_4k;
+脚本6-10　BLOCK为4KB的SQL性能
+
+8KB的表空间情况：
+set autotrace on
+SQL> select count(*) from t_8k;
+脚本6-11　BLOCK为8KB的SQL性能
+16KB的表空间情况：
+set autotrace on
+SQL> select count(*) from t_16k;
+脚本6-12　BLOCK为16KB的SQL性能
+
+--------------------------------------------------------------------------------------------
+
+6.3.2　段的相关案例
+分区表的分段：
+SQL> SET LINESIZE 666
+SQL> set pagesize 5000
+SQL> column segment_name format a20
+SQL> column partition_name format a20
+SQL> column segment_type format a20
+SQL> select segment_name,
+2         partition_name,
+3         segment_type,
+4         bytes / 1024 / 1024 "字节数(M)",
+5         tablespace_name
+6    from user_segments
+7   where segment_name IN('RANGE_PART_TAB','NORM_TAB');
+脚本6-13　分区表的分段
+
+--------------------------------------------------------------------------------------------
+
+（1）普通表全扫描
+SQL> select *
+2        from norm_tab
+3       where deal_date >= TO_DATE('2015-09-04', 'YYYY-MM-DD')
+4         and deal_date <= TO_DATE('2015-09-07', 'YYYY-MM-DD');
+脚本6-14　普通表的全表扫描
+
+--------------------------------------------------------------------------------------------
+
+（2）分区表局部扫描
+SQL> select *
+2        from range_part_tab
+3       where deal_date >= TO_DATE('2015-09-04', 'YYYY-MM-DD')
+4         and deal_date <= TO_DATE('2015-09-07', 'YYYY-MM-DD');
+脚本6-15　分区表的局部分区扫描
+
+--------------------------------------------------------------------------------------------
+
+2. segment之高水平位相关排查优化案例
+--构造表
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+commit;
+（1）未删表记录前逻辑读巨大
+SQL> --测试表的大小及语句的效率
+SQL> select bytes/1024/1024 from user_segments where segment_name='T';
+BYTES/1024/1024
+---------------
+264
+SQL> select count(*) from t;
+脚本6-16　未删除表记录前逻辑读巨大
+
+（2）删大量记录后逻辑读不变
+SQL> delete from t where rownum<=2000000;
+已删除2000000行。
+SQL> commit;
+提交完成。
+SQL> select bytes/1024/1024 from user_segments where segment_name='T';
+BYTES/1024/1024
+---------------
+264
+SQL> select count(*) from t;
+脚本6-17　删大量记录后逻辑读不变
+
+--------------------------------------------------------------------------------------------
+
+（3）释放高水平位后性能飞跃
+SQL> alter table t move;
+表已更改。
+SQL> select bytes/1024/1024 from user_segments where segment_name='T';
+BYTES/1024/1024
+---------------
+38
+SQL> select count(*) from t;
+脚本6-18　释放高水平位后性能飞跃
+
+--------------------------------------------------------------------------------------------
+
+3. segment之高水平位情况监控
+（1）num_rows和blocks的正常比例
+--构造表
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+commit;
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+select num_rows,blocks from user_tab_statistics where table_name='T';
+脚本6-19　num_rows和blocks的正常比例
+
+--------------------------------------------------------------------------------------------
+
+（2）num_rows和blocks的异常比例
+set autotrace off
+delete from t where rownum<=2300000;
+commit;
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+
+select num_rows,blocks from user_tab_statistics where table_name='T';
+
+--------------------------------------------------------------------------------------------
+
+6.3.3　表空间的案例
+
+1. 表空间查询慢与回收站关系
+sqlplus "/ as sysdba"
+grant create any table to ljb;
+connect ljb/ljb
+drop table test purge;
+create table test as select * from dba_objects where rownum<=2;
+create or replace procedure p_create_tab
+as
+l_sql VARCHAR2(32767);
+BEGIN
+FOR i IN 1..10000
+LOOP
+l_sql := 'CREATE TABLE TEST_LJB_' || i ||'  as select * from test';
+-- dbms_output.put_line(l_sql);
+EXECUTE IMMEDIATE l_sql;
+END LOOP;
+END p_create_tab;
+/
+create or replace procedure p_drop_tab
+as
+l_sql VARCHAR2(32767);
+BEGIN
+FOR i IN 1..10000
+LOOP
+l_sql := 'DROP TABLE TEST_LJB_' ||i;
+-- dbms_output.put_line(l_sql);
+EXECUTE IMMEDIATE l_sql;
+END LOOP;
+END p_drop_tab;
+/
+脚本6-21　构建1000张表
+
+--------------------------------------------------------------------------------------------
+
+查询表空间速度
+exec p_create_tab;
+set timing on
+SELECT A.TABLESPACE_NAME "表空间名",
+A.TOTAL_SPACE "总空间(G)",
+NVL(B.FREE_SPACE, 0) "剩余空间(G)",
+A.TOTAL_SPACE - NVL(B.FREE_SPACE, 0) "使用空间(G)",
+CASE WHEN A.TOTAL_SPACE=0 THEN 0 ELSE trunc(NVL(B.FREE_SPACE, 0) / A.TOTAL_SPACE * 100, 2) END "剩余百分比%" --避免分母为0
+FROM (SELECT TABLESPACE_NAME, trunc(SUM(BYTES) / 1024 / 1024/1024 ,2) TOTAL_SPACE
+FROM DBA_DATA_FILES
+GROUP BY TABLESPACE_NAME) A,
+(SELECT TABLESPACE_NAME, trunc(SUM(BYTES / 1024 / 1024/1024  ),2) FREE_SPACE
+FROM DBA_FREE_SPACE
+GROUP BY TABLESPACE_NAME) B
+WHERE A.TABLESPACE_NAME = B.TABLESPACE_NAME(+)
+ORDER BY 5;
+已用时间： 00:00:00.12
+脚本6-22　查询表空间速度很快
+
+--------------------------------------------------------------------------------------------
+
+drop大量表后
+exec p_drop_tab;
+set timing on
+SELECT A.TABLESPACE_NAME "表空间名",
+A.TOTAL_SPACE "总空间(G)",
+NVL(B.FREE_SPACE, 0) "剩余空间(G)",
+A.TOTAL_SPACE - NVL(B.FREE_SPACE, 0) "使用空间(G)",
+CASE WHEN A.TOTAL_SPACE=0 THEN 0 ELSE trunc(NVL(B.FREE_SPACE, 0) / A.TOTAL_SPACE * 100, 2) END "剩余百分比%" --避免分母为0
+FROM (SELECT TABLESPACE_NAME, trunc(SUM(BYTES) / 1024 / 1024/1024 ,2) TOTAL_SPACE
+FROM DBA_DATA_FILES
+GROUP BY TABLESPACE_NAME) A,
+(SELECT TABLESPACE_NAME, trunc(SUM(BYTES / 1024 / 1024/1024  ),2) FREE_SPACE
+FROM DBA_FREE_SPACE
+GROUP BY TABLESPACE_NAME) B
+WHERE A.TABLESPACE_NAME = B.TABLESPACE_NAME(+)
+ORDER BY 5;
+脚本6-23　drop大量表后，查询表空间速度很快
+
+--------------------------------------------------------------------------------------------
+
+2. 表空间频繁扩展与插入性能
+环境搭建:
+--- 分别建固定尺寸和自动扩展的两个表空间
+set timing on
+drop tablespace tbs_ljb_a including contents and datafiles;
+drop tablespace tbs_ljb_b including contents and datafiles;
+create tablespace TBS_LJB_A datafile  'D:\ORACLE\ORADATA\TEST11G\TBS_LJB_A.DBF' size 1M autoextend on uniform size 64k;
+create tablespace TBS_LJB_B datafile  'D:\ORACLE\ORADATA\TEST11G\TBS_LJB_B.DBF' size 2G ;
+---分别在两个不同表空间建表
+connect ljb/ljb
+set timing on
+CREATE TABLE t_a (id int,contents varchar2(1000)) tablespace TBS_LJB_A;
+CREATE TABLE t_b (id int,contents varchar2(1000)) tablespace TBS_LJB_B;
+脚本6-24　分别建固定尺寸和自动扩展的表空间及对应表
+
+--------------------------------------------------------------------------------------------
+
+分别往两表插入相同量的数据
+---往可自动扩展表空间的表中插入数据
+SQL> insert into t_a select rownum,LPAD('1', 1000, '*') from dual connect by level<=200000;
+已创建200000行。
+已用时间:  00: 00: 52.41
+---往固定大小的表空间的表中插入数据
+SQL> insert into t_b select rownum,LPAD('1', 1000, '*') from dual connect by level<=200000;
+已创建200000行。
+已用时间:  00: 00: 15.17
+两表的extent数量差异显著
+SQL> select count(*) from user_extents where segment_name='T_A';
+SQL> select count(*) from user_extents where segment_name='T_B';
+脚本6-26　两表的extent数量差异显著
+
+--------------------------------------------------------------------------------------------
+
+6.3.4　rowid
+环境搭建
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+set linesize 1000
+set autotrace traceonly
+
+1. 方法1（全表扫描）
+SQL> select /*+full(t)*/ * from t where object_id=2;
+脚本6-27　三种扫描方式之全表扫描
+2. 方法2（索引扫描）
+SQL> select * from t where object_id=2;
+脚本6-28　三种扫描方式之索引扫描
+3. 方法3（rowid扫描）
+SQL> select * from t where object_id=2 and rowid='AAAYiZAALAAAADLAAw';
+脚本6-29　三种扫描方式之rowid扫描
