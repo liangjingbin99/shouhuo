@@ -1,0 +1,544 @@
+
+
+第10章　且慢，其他索引应用让SQL飞
+
+10.2.1　位图索引
+1. 位图索引之如何高效即席查询
+做位图索引与即席查询试验前的准备：
+drop table t purge;
+set autotrace off
+create table t
+(name_id,
+gender not null,
+location not null,
+age_group not null,
+data
+)
+as
+select rownum,
+decode(ceil(dbms_random.value(0,2)),
+1,'M',
+2,'F')gender,
+ceil(dbms_random.value(1,50)) location,
+decode(ceil(dbms_random.value(0,3)),
+1,'child',
+2,'young',
+3,'middle_age',
+4,'old'),
+rpad('*',400,'*')
+from dual
+connect by rownum<=100000;
+--注意，以下收集统计信息操作必须先执行。
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+脚本10-1　位图索引试验环境准备
+
+
+--------------------------------------------------------------------------------------------
+
+即席查询中应用全表扫描的代价：
+set linesize 1000
+set autotrace traceonly
+select *
+from t
+where gender='M'
+and location in (1,10,30)
+and age_group='child';
+脚本10-2　即席查询中应用全表扫描的代价
+
+
+--------------------------------------------------------------------------------------------
+
+
+drop index idx_union;
+create index idx_union on t(gender,location,age_group);
+select *
+from t
+where gender='M'
+and location in (1,10,30)
+and age_group='child';
+脚本10-3　即席查询中应用组合索引的代价
+
+
+--------------------------------------------------------------------------------------------
+
+
+即席查询应用位图索引，性能有飞跃，Oracle自己选择了使用位图索引：
+create bitmap index gender_idx on t(gender);
+create bitmap index location_idx on t(location);
+create bitmap index age_group_idx on t(age_group);
+select *
+from t
+where gender='M'
+and location in (1,10,30)
+and age_group='child';
+脚本10-4　即席查询中应用位图索引的代价
+
+
+--------------------------------------------------------------------------------------------
+
+2.　位图索引之如何快速统计条数
+drop table t purge;
+set autotrace off
+create table t as select * from dba_objects;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+update t set object_id=rownum;
+commit;
+脚本10-5　Count性能试验的环境准备
+
+
+--------------------------------------------------------------------------------------------
+
+场景1
+set autotrace on
+set linesize 1000
+select count(*) from t;
+脚本10-6　Count应用全表扫描的代价 
+
+
+--------------------------------------------------------------------------------------------
+
+
+场景2，
+create index idx_t_obj on t(object_id);
+alter table T modify object_id not null;
+set autotrace on
+select count(*) from t;
+脚本10-7　Count应用普通索引的代价 
+
+
+--------------------------------------------------------------------------------------------
+
+
+观察COUNT(*)用位图索引的代价
+create bitmap index idx_bitm_t_status on t(status);
+select count(*) from t;
+SQL> select count(*) from t;
+脚本10-8　Count应用位图索引的代价
+
+
+--------------------------------------------------------------------------------------------
+
+
+10.2.2　函数索引
+1. 函数索引妙用之部分记录建索引
+首先看一个例子，普通索引的情况，如下：
+drop table t purge;
+set autotrace off
+create table t (id int ,status varchar2(2));
+--建立普通索引
+create index id_normal on t(status);
+insert into t select rownum ,'Y' from dual connect by rownum<=1000000;
+insert into t select 1 ,'N' from dual;
+commit;
+analyze table t compute statistics for table for all indexes for all indexed columns;
+set linesize 1000
+set autotrace traceonly
+select * from t where status='N';
+--看索引情况
+set autotrace off
+analyze index id_normal validate structure;
+select name,btree_space,lf_rows,height from index_stats;
+set autotrace off
+analyze index id_normal validate structure;
+select name,btree_space,lf_rows,height from index_stats;
+脚本10-9　未对部分数据建索引的普通索引方式
+
+
+--------------------------------------------------------------------------------------------
+
+建函数索引的情况
+drop index id_normal;
+create index id_status on  t (Case when status= 'N' then 'N' end);
+analyze table t compute statistics for table for all indexes for all indexed columns;
+/*以下这个select * from t where (case when status='N' then 'N' end)='N'
+写法不能变,如果是select * from t where status='N'将无效!笔者见过有些人设置了选择性索引，却这样调用的，结果根本起不到任何效果！
+*/
+set autotrace traceonly
+select * from t where (case when status='N' then 'N' end)='N';
+--接着观察id_status（即函数索引）索引的情况
+set autotrace off
+analyze index id_status validate structure;
+select name,btree_space,lf_rows,height from index_stats;
+脚本10-10　对部分数据建索引的函数索引方式
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 函数索引妙用之减少递归调用
+首先构造自定义函数的环境，如下所示：
+drop table t1 purge;
+drop table t2 purge;
+create table t1 (first_name varchar2(200),last_name varchar2(200),id number);
+create table t2 as select * from dba_objects where rownum<=1000
+insert into t1 (first_name,last_name,id) select object_name,object_type,rownum from dba_objects where rownum<=1000;
+commit;
+create or replace function get_obj_name(p_id t2.object_id%type) return t2.object_name%type DETERMINISTIC is
+v_name t2.object_name%type;
+begin
+select object_name
+into v_name
+from t2
+where object_id=p_id;
+return v_name;
+end;
+/
+脚本10-11　自定义函数的环境构造
+
+
+--------------------------------------------------------------------------------------------
+
+未建函数索引的情况下：
+set linesize 1000
+set autotrace traceonly
+select *   from t1 where get_obj_name(id)='TEST'  ;
+脚本10-12　未建函数索引的函数调用性能
+
+
+--------------------------------------------------------------------------------------------
+
+建自定义函数get_obj_name的函数索引
+create index idx_func_id on t1(get_obj_name(id));
+select *   from t1 where get_obj_name(id)='TEST'  ;
+脚本10-13　建函数索引后的性能情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+10.2.4　全文索引
+1. 全文索引性能优势之妙用索引
+环境准备：
+sqlplus ljb/ljb
+drop table test purge;
+create table test as select * from dba_objects;
+update test set object_name='高兴' where rownum<=2;
+create index idx_object_name on test(object_name);
+set autotrace traceonly explain
+select * from test where object_name like '%高兴%';
+exit;
+sqlplus "/ as sysdba"
+grant ctxapp to ljb;
+alter user ctxsys  account unlock;
+alter user ctxsys identified  by ctxsys;
+connect ctxsys/ctxsys;
+grant execute on ctx_ddl to ljb;
+connect ljb/ljb
+
+--第一次执行无须注释掉头两条
+Begin
+ctx_ddl.drop_preference('club_lexer');
+ctx_ddl.drop_preference('mywordlist');
+ctx_ddl.create_preference('club_lexer','CHINESE_LEXER');
+ctx_ddl.create_preference('mywordlist', 'BASIC_WORDLIST');
+ctx_ddl.set_attribute('mywordlist','PREFIX_INDEX','TRUE');
+ctx_ddl.set_attribute('mywordlist','PREFIX_MIN_LENGTH',1);
+ctx_ddl.set_attribute('mywordlist','PREFIX_MAX_LENGTH', 5);
+ctx_ddl.set_attribute('mywordlist','SUBSTRING_INDEX', 'YES');
+end;
+/
+create index  id_cont_test on TEST (object_name) indextype is ctxsys.context
+parameters (
+'DATASTORE CTXSYS.DIRECT_DATASTORE FILTER
+CTXSYS.NULL_FILTER LEXER club_lexer WORDLIST mywordlist');
+脚本10-14　全文检索的环境搭建 
+
+
+--------------------------------------------------------------------------------------------
+
+接下来执行普通的查询语句，果然用不到索引：
+exec ctx_ddl.sync_index('id_cont_TEST', '20M');
+set autotrace traceonly
+set linesize 1000
+select * from test where OBJECT_NAME like '%高兴%';
+脚本10-15　普通索引的模糊查找用不到索引
+接下来用全文检索方法，果然用到索引：
+select * from test where contains(OBJECT_NAME,'高兴')>0;
+脚本10-16　应用全文检索完成快速检索
+
+
+--------------------------------------------------------------------------------------------
+
+10.3.1　位图索引
+位图索引陷阱之列重复度低慎建
+    环境准备：
+--测试位图索引重复度前准备工作
+drop table t purge;
+set autotrace off
+create table t as select * from dba_objects;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+update t set object_id=rownum;
+commit;
+脚本10-17　位图索引案例的重复列环境构造
+
+
+--------------------------------------------------------------------------------------------
+
+COUNT(*)在列重复度低时一般不会考虑使用位图索引：
+create bitmap index idx_bit_object_id on t(object_id);
+create bitmap index idx_bit_status on t(status);
+--注意，以下收集统计信息的操作必须先执行。
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+set linesize 1000
+set autotrace traceonly
+/*同学们可能还记得前面count(*)性能大比拼中位图索引一马当先的事，现在我们看看，不在status列建位图索引，在object_id列建位图索引后，是啥情况
+*/
+--create bitmap index idx_bit_object_id on t(object_id);
+select /*+index(t,idx_bit_object_id)*/  count(*) from t;
+脚本10-18　在重复度极低的列建位图索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+接下来看看查询运用针对Status列建函数索引的情况：
+select /*+index(t,index idx_bit_status)*/  count(*) from t;
+脚本10-19　在重复度极高的列建位图索引
+
+
+--------------------------------------------------------------------------------------------
+
+在重复度低的列建位图索引性能低下原因 
+set autotrace off
+select segment_name,blocks,bytes/1024/1024 "SIZE(M)"
+from user_segments
+where segment_name in( 'IDX_BIT_OBJECT_ID','IDX_BIT_STATUS');
+脚本10-20　在重复度低的列建位图索引性能低下原因 
+
+
+--------------------------------------------------------------------------------------------
+
+
+
+10.3.2　函数索引
+1. 函数索引陷阱之30553错误
+sqlplus ljb/ljb
+drop table test;
+create table test as select * from user_objects ;
+create or replace function f_minus1(i int)
+return int
+is
+begin
+return(i-1);
+end;
+/
+---建完函数后我们试着建立函数索引，发现建立失败
+create index idx_ljb_test on test (f_minus1(object_id));
+将会出现如下错误：
+create or replace function f_minus1(i int)
+return int DETERMINISTIC
+is
+begin
+return(i-1);
+end;
+/
+--现在发现加上DETERMINISTIC关键字后的自定义函数可以建立函数索引了！
+create index idx_test on test (f_minus1(object_id));
+explain plan for select * from test where f_minus1(object_id)=23;
+set linesize 1000
+SQL> select * from table(dbms_xplan.display);
+脚本10-21　函数索引陷阱之30553错误
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 函数索引与各种列的运算
+测试函数索引前的准备：
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+create index idx_object_name on t(object_name);
+create index idx_created on t(created);
+写法1：
+set autotrace traceonly
+set linesize 1000
+select * from t where object_id-10<=30;
+脚本10-22　对列进行运算的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+写法2
+select * from t where object_id<=30+10;
+脚本10-23　改变写法，消除列运算后的性能
+也可以这样建索引：
+select * from t where object_id-10<=30;
+脚本10-24　列运算可用函数索引来优化，但是要慎用
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. 函数索引与各种列的函数转换
+环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id);
+create index idx_object_name on t(object_name);
+create index idx_created on t(created);
+对列做UPPER操作，无法用到索引：
+set autotrace traceonly
+set linesize 1000
+---以下语句由于列运算，所以走的是全表扫描
+select * from t  where upper(object_name)='T' ;
+脚本10-25　对列做UPPER操作，无法用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+去掉列的upper操作后立即用索引：
+select * from t  where  object_name='T' ;
+脚本10-26　去掉列UPPER操作，能用到索引
+如果必须用upper的条件，那你想用到索引，就得去建函数索引：
+create index idx_func_ojbnam on t(upper(object_name));
+--继续执行，终于走索引了。
+select * from t  where upper(object_name)='T' ;
+脚本10-27　建函数索引则能用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+4. 函数索引与各种列的类型转换
+--举例说明：
+drop table t_col_type purge;
+create table t_col_type(id varchar2(20),col2 varchar2(20),col3 varchar2(20));
+insert into t_col_type select rownum,'abc','efg' from dual connect by level<=10000;
+commit;
+create index idx_id on t_col_type(id);
+set linesize 1000
+set autotrace traceonly
+select * from t_col_type where id=6;
+脚本10-28　列的类型转化导致用不到索引
+
+
+--------------------------------------------------------------------------------------------
+
+如下写法才可以用到索引
+select * from t_col_type where id='6';
+脚本10-29　消除列的类型转化能用到索引
+再有就是函数索引的写法：
+create index idx_func_tonumber_id on t_col_type(to_number(id));
+select * from t_col_type where to_number(id)=6;
+脚本10-30　列类型转换中函数索引的思路
+
+
+--------------------------------------------------------------------------------------------
+
+
+5. 函数索引陷阱之函数变更与影响
+环境搭建
+drop table t purge;
+create table t ( x number, y varchar2(30));
+set autotrace off
+insert into t SELECT rownum, rownum||'a' FROM dual connect by rownum < 1000;
+create or replace
+package pkg_f is
+function f(p_value varchar2) return varchar2 deterministic;
+end;
+/
+create or replace
+package body pkg_f is
+function f(p_value varchar2) return varchar2
+deterministic is
+begin
+return p_value;
+end;
+end;
+/
+create index idx_pkg_f_y on t ( pkg_f.f(y));
+analyze table t compute statistics for table for all indexes for all indexed columns;
+set autotrace on explain
+SELECT * FROM t WHERE pkg_f.f(y)= '8a';
+SQL> SELECT * FROM t WHERE pkg_f.f(y)= '8a';
+脚本10-31　函数索引陷阱试验的环境搭建 
+
+
+--------------------------------------------------------------------------------------------
+
+
+将包的代码修改后，我们惊奇地发现查询结果有误：
+create or replace
+package body pkg_f is
+function f(p_value varchar2) return varchar2
+deterministic is
+begin
+return p_value||'b';
+end;
+end;
+/
+
+
+--------------------------------------------------------------------------------------------
+
+惊奇地发现查询出错误的值：
+SELECT * FROM t WHERE pkg_f.f(y)= '8a';
+脚本10-32　函数代码更改后，查询数据有误
+在重建索引后查询没有记录，这才是正确的结果：
+SQL> drop index idx_pkg_f_y;
+索引已删除。
+SQL> create index idx_pkg_f_y on t ( pkg_f.f(y));
+索引已创建。
+SQL> SELECT * FROM t WHERE pkg_f.f(y)= '8a';
+脚本10-33　函数索引重建后数据查询正常
+
+
+--------------------------------------------------------------------------------------------
+
+
+10.3.3　反向键索引
+脚本环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+update t set CREATED=sysdate-rownum ;
+create index idx_rev_objn on t(object_name) reverse ;
+create index idx_rev_created on t(created) reverse ;
+反向键索引可以用在等值查询：
+set autotrace traceonly
+set linesize 1000
+select * from t where created=sysdate-1;
+脚本10-34　反向键索引可用于等值查询
+
+
+--------------------------------------------------------------------------------------------
+
+
+但是反向键索引不能用在范围查询：
+select * from t where created>=sysdate-10 and created<=sysdate-1;
+脚本10-35　反向键索引不可用于范围查询
+
+
+--------------------------------------------------------------------------------------------
+
+10.3.4　全文索引
+1. 全文索引负面之谨防数据更新
+create index  id_cont_test on TEST (object_name) indextype is ctxsys.context
+parameters (
+'DATASTORE CTXSYS.DIRECT_DATASTORE FILTER
+CTXSYS.NULL_FILTER LEXER club_lexer WORDLIST mywordlist');
+exec ctx_ddl.sync_index('id_cont_TEST', '20M');
+set autotrace on explain
+set linesize 1000 
+         
+select count(*) from test where contains(OBJECT_NAME,'高兴')>0;
+update test set object_name='高兴' where object_id>=3 and object_id<=5;
+commit;
+--发现由于又修改了3条记录，查询结果本应该由2条变更为5条记录，但是发现再查，依然是2条!
+select count(*) from test where contains(OBJECT_NAME,'高兴')>0;
+---继续执行同步命令后
+exec ctx_ddl.sync_index('id_cont_test', '20M');
+---再次查询后，终于发现这下是5条记录了。
+SQL> select count(*) from test where contains(OBJECT_NAME,'高兴')>0;
+脚本10-36　数据更新与全文检索
