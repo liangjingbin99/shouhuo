@@ -1,0 +1,575 @@
+
+第８章　且慢，学习索引如何让SQL飞
+
+
+8.2.1　经典三大特性
+1. 索引高度较低（可快速定位）
+（1）索引高度较低的直观体验
+环境准备，
+sqlplus ljb/ljb
+drop table t1 purge;
+drop table t2 purge;
+drop table t3 purge;
+drop table t4 purge;
+drop table t5 purge;
+drop table t6 purge;
+drop table t7 purge;
+create table t1 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=1;
+create table t2 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=10;
+create table t3 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=100;
+create table t4 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=1000;
+create table t5 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=10000;
+create table t6 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=100000;
+create table t7 as select rownum as id ,rownum+1 as id2,rpad('*',1000,'*') as contents from dual connect by level<=1000000;
+create index idx_id_t1 on t1(id);
+create index idx_id_t2 on t2(id);
+create index idx_id_t3 on t3(id);
+create index idx_id_t4 on t4(id);
+create index idx_id_t5 on t5(id);
+create index idx_id_t6 on t6(id);
+create index idx_id_t7 on t7(id);
+
+--------------------------------------------------------------------------------------------
+
+接下来执行如下语句查询：
+set linesize 1000
+set autotrace off
+select index_name,
+blevel,
+leaf_blocks,
+num_rows,
+distinct_keys,
+clustering_factor
+from user_ind_statistics
+where table_name in( 'T1','T2','T3','T4','T5','T6','T7');
+脚本8-1　索引高度较低的直观体验
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）高度低有利于索引范围扫描
+select * from t1 where id=1;
+select /*+full(t1)*/ * from t1 where id=1;
+语句2，针对t2表的索引访问和全表扫描访问，如下：
+select * from t2 where id=1;
+select /*+full(t2)*/ * from t2 where id=1;
+语句3，针对t3表的索引访问和全表扫描访问，如下：
+select * from t3 where id=1;
+select /*+full(t3)*/ * from t3 where id=1;
+语句4，针对t4表的索引访问和全表扫描访问，如下：
+select * from t4 where id=1;
+select /*+full(t4)*/ * from t4 where id=1;
+语句5，针对t5表的索引访问和全表扫描访问，如下：
+select * from t5 where id=1;
+select /*+full(t5)*/ * from t5 where id=1;
+语句6，针对t6表的索引访问和全表扫描访问，如下：
+select * from t6 where id=1;
+select /*+full(t6)*/ * from t6 where id=1;
+语句7，针对t7表的索引访问和全表扫描访问，如下：
+select * from t7 where id=1;
+select /*+full(t7)*/ * from t7 where id=1;
+脚本8-2　高度低有利于索引范围扫描
+
+
+--------------------------------------------------------------------------------------------
+
+2. 索引存储列值（可优化聚合）
+（1）索引特性之存列值优化count
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create index idx1_object_id on t(object_id);
+set autotrace on
+select count(*) from t;
+脚本8-3　count无法用到
+
+
+--------------------------------------------------------------------------------------------
+
+
+修改代码让count用到索引
+select count(*) from t where object_id is not null;
+脚本8-4　修改代码让count用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+修改代码让count用到索引
+alter table t modify OBJECT_ID not null;
+select count(*) from t;
+脚本8-5　修改代码让count用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+主键让count用到索引
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+alter table t add constraint pk1_object_id primary key (OBJECT_ID);
+set autotrace on
+select count(*) from t;
+脚本8-6　主键让count用到索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+（2）索引特性之存列值优化sum avg
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx1_object_id on t(object_id);
+set autotrace on
+set linesize 1000
+set timing on
+select sum(object_id) from t;
+
+脚本8-7　索引特性之存列值优化sum avg
+
+
+--------------------------------------------------------------------------------------------
+
+
+sum avg不走索引的代价
+select /*+full(t)*/ sum(object_id) from t;
+脚本8-8　sum avg不走索引的代价
+
+
+--------------------------------------------------------------------------------------------
+
+3. 索引本身有序（可优化排序）
+（1）索引特性之有序优化order by
+set autotrace traceonly
+set linesize 1000
+drop table t purge;
+create table t as select * from dba_objects;
+select * from t where object_id>2 order by object_id;
+脚本8-9　无索引的order by 语句必然会排序
+
+
+--------------------------------------------------------------------------------------------
+
+
+索引让order by 语句排序消失
+create index idx_t_object_id on t(object_id);
+set autotrace traceonly
+select * from t where object_id>2 order by object_id;
+脚本8-10　索引让order by 语句排序消失
+
+
+--------------------------------------------------------------------------------------------
+
+（2）索引特性之有序优化Max/Min
+--MAX/MIN 的索引优化
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+alter table t add constraint pk_object_id primary key (OBJECT_ID);
+set autotrace on
+set linesize 1000
+select max(object_id) from t;
+脚本8-11　MAX/MIN 的索引优化
+
+
+--------------------------------------------------------------------------------------------
+
+
+MAX/MIN 语句用不到索引性能低下
+select /*+full(t)*/ max(object_id) from t;
+脚本8-12　MAX/MIN 语句用不到索引性能低下
+
+
+--------------------------------------------------------------------------------------------
+
+
+MAX/MIN 用索引与数据量增加的影响
+set autotrace off
+drop table t_max purge;
+create table t_max as select * from dba_objects;
+insert into t_max select * from t_max;
+insert into t_max select * from t_max;
+insert into t_max select * from t_max;
+insert into t_max select * from t_max;
+insert into t_max select * from t_max;
+select count(*) from t_max;
+create index idx_t_max_obj on t_max(object_id);
+set autotrace on
+select max(object_id) from t_max;
+脚本8-13　MAX/MIN 用索引与数据量增加的影响
+
+
+--------------------------------------------------------------------------------------------
+
+
+8.2.2　组合索引选用
+3. 仅等值无范围查询时，组合的顺序不影响性能
+环境准备：
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t select * from t;
+insert into t select * from t;
+insert into t select * from t;
+update t set object_id=rownum ;
+commit;
+create index idx_id_type on t(object_id,object_type);
+create index idx_type_id on t(object_type,object_id);
+set autotrace off
+alter session set statistics_level=all ;
+set linesize 366
+type_id，id顺序组合索引
+select /*+index(t,idx_id_type)*/ * from  t  where object_id=20  and object_type='TABLE';
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-14　type_id，id顺序组合索引
+
+--------------------------------------------------------------------------------------------
+
+id、type_id顺序组合索引
+select /*+index(t,idx_type_id)*/ * from  t  where object_id=20  and object_type='TABLE';
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-15　id、type_id顺序组合索引
+
+
+--------------------------------------------------------------------------------------------
+
+
+4. 组合索引最佳顺序一般是将等值查询的列置前
+将等值查询的列置前
+select /*+index(t,idx_id_type)*/ *  from   t where object_id>=20 and object_id<2000 and object_type='TABLE';
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-16　将等值查询的列置前
+将等值查询的列置后
+select /*+index(t,idx_type_id)*/ *  from  t  where object_id>=20 and object_id<2000   and object_type='TABLE';
+脚本8-17　将等值查询的列置后
+
+
+--------------------------------------------------------------------------------------------
+
+
+8.2.3　索引扫描类型的分类与构造
+1. INDEX RANGE SCAN
+
+--请记住这个INDEX RANGE SCAN扫描方式
+drop table t purge;
+
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create  index idx_object_id on t(object_id);
+set autotrace traceonly
+set linesize 1000
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed
+columns',cascade=>TRUE) ;
+select * from t where object_id=8;
+脚本8-18　INDEX RANGE SCAN
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. INDEX UNIQUE SCAN
+--请注意这个INDEX UNIQUE SCAN扫描方式,在唯一索引情况下使用。
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create unique index idx_object_id on t(object_id);
+set autotrace traceonly
+set linesize 1000
+select * from t where object_id=8;
+脚本8-19　INDEX UNIQUE SCAN
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. TABLE ACCESS BY USER ROWID
+--请注意这个TABLE ACCESS BY USER ROWID扫描方式,直接根据rowid来访问，最快的访问方式！
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+--注意，这里连索引都没建!
+--create  index idx_object_id on t(object_id);
+set autotrace off
+select rowid from t where object_id=8;
+ROWID
+-----
+AAAZxiAAGAAAB07AAH
+set autotrace traceonly
+set linesize 1000
+select * from t where object_id=8 and rowid='AAAZxiAAGAAAB07AAH';
+脚本8-20　TABLE ACCESS BY USER ROWID
+
+
+--------------------------------------------------------------------------------------------
+
+
+4. INDEX FULL SCAN
+--请记住这个INDEX FULL SCAN扫描方式，并体会与INDEX FAST FULL SCAN的区别
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+alter table T modify object_id not null;
+create  index idx_object_id on t(object_id);
+set autotrace traceonly
+set linesize 1000
+select * from t  order by object_id;
+脚本8-21　INDEX FULL SCAN
+
+
+--------------------------------------------------------------------------------------------
+
+
+5. INDEX FAST FULL SCAN
+---请记住这个INDEX FAST FULL SCAN扫描方式，并体会与INDEX FULL SCAN的区别
+drop table t purge;
+create table t as select * from dba_objects ;
+update t set object_id=rownum;
+commit;
+alter table T modify object_id not null;
+create  index idx_object_id on t(object_id);
+set autotrace traceonly
+set linesize 1000
+select count(*) from t;
+脚本8-22　INDEX FAST FULL SCAN 
+
+
+--------------------------------------------------------------------------------------------
+
+
+6. INDEX FULL SCAN (MINMAX)
+--请注意这个INDEX FULL SCAN (MIN/MAX)扫描方式
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create  index idx_object_id on t(object_id);
+set autotrace traceonly
+set linesize 1000
+select max(object_id) from t;
+脚本8-23　INDEX FULL SCAN (MINMAX)
+
+
+--------------------------------------------------------------------------------------------
+
+
+7. INDEX SKIP SCAN
+--请记住这个INDEX SKIP SCAN扫描方式
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_type='TABLE' ;
+commit;
+update t set object_type='VIEW' where rownum<=30000;
+commit;
+create  index idx_type_id on t(object_type,object_id);
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T',estimate_percent => 10,method_opt=> 'for all indexed
+columns',cascade=>TRUE) ;
+set autotrace traceonly
+set linesize 1000
+select * from t where object_id=8;
+脚本8-24　INDEX SKIP SCAN
+
+
+--------------------------------------------------------------------------------------------
+
+
+8. TABLE ACCESS BY INDEX ROWID
+--好好地体会前后两个试验，记住这个TABLE ACCESS BY INDEX ROWID
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+create  index idx_object_id on t(object_id);
+set autotrace traceonly explain
+set linesize 1000
+select object_id from t where object_id=2 and object_type='TABLE';
+--在接下来的试验中，你会看到，哇塞，TABLE ACCESS BY INDEX ROWID消失了。
+create  index idx_id_type on t(object_id,object_type);
+select object_id from t where object_id=2 and object_type='TABLE';
+脚本8-25　TABLE ACCESS BY INDEX ROWID
+
+
+--------------------------------------------------------------------------------------------
+
+
+8.3　索引相关优化案例
+8.3.1　三大特性的相关案例
+1. 分区表各类聚合优化玄机
+语句1：
+select max(nbr) max_nbr
+from range_part_tab
+where deal_date >= TO_DATE('2015-05-01', 'YYYY-MM-DD')
+and deal_date < TO_DATE('2015-06-01', 'YYYY-MM-DD');
+脚本8-26　分区表普通聚合写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+接下来看语句2：
+select max(nbr) max_nbr from range_part_tab partition(p_201505);
+脚本8-27　分区表“特殊”聚合写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+语句3：
+select count(*) max_nbr
+from range_part_tab
+where deal_date >= TO_DATE('2015-05-01', 'YYYY-MM-DD')
+and deal_date < TO_DATE('2015-06-01', 'YYYY-MM-DD');
+脚本8-28　分区表COUNT普通写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+语句4：
+select count(*) max_nbr from range_part_tab partition(p_201505);
+脚本8-29　分区表COUNT“特殊”写法的性能
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 啥时分区索引性能反而低
+环境准备
+drop table part_tab purge;
+create table part_tab (id int,col2 int,col3 int)
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (30000),
+partition p4 values less than (40000),
+partition p5 values less than (50000),
+partition p6 values less than (60000),
+partition p7 values less than (70000),
+partition p8 values less than (80000),
+partition p9 values less than (90000),
+partition p10 values less than (100000),
+partition p11 values less than (maxvalue)
+)
+;
+insert into part_tab select rownum,rownum+1,rownum+2 from dual connect by rownum <=110000;
+commit;
+create  index idx_par_tab_col2 on part_tab(col2) local;
+create  index idx_par_tab_col3 on part_tab(col3) ;
+drop table norm_tab purge;
+create table norm_tab  (id int,col2 int,col3 int);
+insert into norm_tab select rownum,rownum+1,rownum+2 from dual connect by rownum <=110000;
+commit;
+create  index idx_nor_tab_col2 on norm_tab(col2) ;
+create  index idx_nor_tab_col3 on norm_tab(col3) ;
+脚本8-30　构造分区表和普通表的环境
+
+
+--------------------------------------------------------------------------------------------
+
+
+分区表局部分区扫描的情况
+set autotrace traceonly
+set linesize 1000
+set timing on
+select * from part_tab where col2=8 ;
+脚本8-31　分区表局部分区扫描的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+普通表索引扫描的情况
+select * from norm_tab where col2=8 ;
+脚本8-32　普通表索引扫描的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. 同时取最大最小值的案例
+环境准备
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum;
+commit;
+alter table t add constraint pk_object_id primary key (OBJECT_ID);
+set autotrace on
+set linesize 1000
+看看执行计划是什么：
+set linesize 1000
+set autotrace on
+select max(object_id),min(object_id) from t;
+脚本8-33　同时取最大最小值的语句写法
+
+
+--------------------------------------------------------------------------------------------
+
+
+同时取最大最小值的语句的改造写法
+select max, min
+from (select max(object_id) max from t ) a,
+(select min(object_id) min from t ) b;
+脚本8-34　同时取最大最小值的语句的改造写法
+
+
+--------------------------------------------------------------------------------------------
+
+8.3.2　组合索引的经典案例
+1. 组合索引的写法
+drop table t purge;
+create table t as select * from dba_objects;
+update t set object_id=rownum ;
+create index idx_id_type on t(object_id,object_type);
+UPDATE t SET OBJECT_ID=20 WHERE ROWNUM<=26000;
+UPDATE t SET OBJECT_ID=21 WHERE OBJECT_ID<>20;
+COMMIT;
+set linesize 1000
+set pagesize 1
+alter session set statistics_level=all ;
+select  /*+index(t,idx1_object_id)*/ * from t  where object_TYPE='TABLE'  AND OBJECT_ID >= 20 AND OBJECT_ID<= 21;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-35　组合索引与范围写法
+组合索引与In写法
+select  /*+index(t,idx_id_type)*/ * from t t where object_TYPE='TABLE'  AND  OBJECT_ID IN (20,21);
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-36　组合索引与In写法
+
+
+--------------------------------------------------------------------------------------------
+
+2. 组合索引与增加检索条件
+环境准备
+drop table t purge;
+create table t as select * from dba_objects;
+UPDATE t SET OBJECT_ID=20 WHERE ROWNUM<=26000;
+UPDATE t SET OBJECT_ID=21 WHERE OBJECT_ID<>20;
+Update t set object_id=22 where rownum<=10000;
+COMMIT;
+create index idx_union on t(object_type,object_id,owner);
+set autotrace off
+alter session set statistics_level=all ;
+set linesize 1000
+
+
+--------------------------------------------------------------------------------------------
+
+写法1
+select * from t where object_type='VIEW' and OWNER='LJB'
+脚本8-37　未增加OBJECT_ID列的写法
+
+
+--------------------------------------------------------------------------------------------
+
+写法2
+select /*+index(T IDX_UNION)*/
+* from t T where object_type='VIEW'
+and OBJECT_ID IN (20,21,22)
+AND OWNER='LJB';
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本8-38　增加OBJECT_ID列的写法
