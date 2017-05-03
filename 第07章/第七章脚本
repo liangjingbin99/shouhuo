@@ -1,0 +1,1132 @@
+
+
+第7章　且慢，探寻表的设计让SQL飞(上)
+
+7.2.1　表的设计
+1. 分区表应用
+（1）分区类型
+1）范围分区
+SQL> drop table range_part_tab purge;
+表已删除。
+SQL> --注意，此分区为范围分区
+SQL> create table range_part_tab (id number,deal_date date,area_code number,contents varchar2(4000))
+2          partition by range (deal_date)
+3          (
+4          partition p1 values less than (TO_DATE('2015-02-01', 'YYYY-MM-DD')),
+5          partition p2 values less than (TO_DATE('2015-03-01', 'YYYY-MM-DD')),
+6          partition p3 values less than (TO_DATE('2015-04-01', 'YYYY-MM-DD')),
+7          partition p4 values less than (TO_DATE('2015-05-01', 'YYYY-MM-DD')),
+8          partition p5 values less than (TO_DATE('2015-06-01', 'YYYY-MM-DD')),
+9          partition p6 values less than (TO_DATE('2015-07-01', 'YYYY-MM-DD')),
+10          partition p7 values less than (TO_DATE('2015-08-01', 'YYYY-MM-DD')),
+11          partition p8 values less than (TO_DATE('2015-09-01', 'YYYY-MM-DD')),
+12          partition p9 values less than (TO_DATE('2015-10-01', 'YYYY-MM-DD')),
+13          partition p10 values less than (TO_DATE('2015-11-01', 'YYYY-MM-DD')),
+14          partition p11 values less than (TO_DATE('2015-12-01', 'YYYY-MM-DD')),
+15          partition p12 values less than (TO_DATE('2016-01-01', 'YYYY-MM-DD')),
+16          partition p_max values less than (maxvalue)
+17          )
+18          ;
+表已创建。
+SQL>
+SQL> --以下是插入一整年日期随机数和表示福建地区号含义（591到599）的随机数记录，共有10万条，如下：
+SQL> insert into range_part_tab (id,deal_date,area_code,contents)
+2    select rownum,
+3           to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+4           ceil(dbms_random.value(590,599)),
+5           rpad('*',400,'*')
+6      from dual
+7    connect by rownum <= 100000;
+已创建100000行。
+SQL> commit;
+提交完成。
+脚本7-1　范围分区的例子
+
+--------------------------------------------------------------------------------------------
+
+2）列表分区
+SQL> drop table list_part_tab purge;
+表已删除。
+SQL> --注意，此分区为列表分区
+SQL> create table list_part_tab (id number,deal_date date,area_code number,contents varchar2(4000))
+2          partition by list (area_code)
+3          (
+4          partition p_591 values  (591),
+5          partition p_592 values  (592),
+6          partition p_593 values  (593),
+7          partition p_594 values  (594),
+8          partition p_595 values  (595),
+9          partition p_596 values  (596),
+10          partition p_597 values  (597),
+11          partition p_598 values  (598),
+12          partition p_599 values  (599),
+13          partition p_other values  (DEFAULT)
+14          )
+15          ;
+表已创建。
+SQL> --以下是插入一整年日期随机数和表示福建地区号含义（591到599）的随机数记录，共有10万条，如下：
+SQL> insert into list_part_tab (id,deal_date,area_code,contents)
+2    select rownum,
+3           to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+4           ceil(dbms_random.value(590,599)),
+5           rpad('*',400,'*')
+6      from dual
+7    connect by rownum <= 100000;
+已创建100000行。
+SQL> commit;
+提交完成。
+脚本7-2　列表分区的例子
+
+--------------------------------------------------------------------------------------------
+
+3）散列分区
+SQL> drop table hash_part_tab purge;
+表已删除。
+SQL> --注意，此分区为HASH分区
+SQL> create table hash_part_tab (id number,deal_date date,area_code number,contents varchar2(4000))
+2          partition by hash (deal_date)
+3          PARTITIONS 12
+4          ;
+表已创建。
+SQL> --以下是插入2012年一整年日期随机数和表示福建地区号含义（591到599）的随机数记录，共有10万条，如下：
+SQL> insert into hash_part_tab(id,deal_date,area_code,contents)
+2    select rownum,
+3           to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+4           ceil(dbms_random.value(590,599)),
+5           rpad('*',400,'*')
+6      from dual
+7    connect by rownum <= 100000;
+已创建100000行。
+SQL> commit;
+提交完成。
+脚本7-3　列表分区的例子
+
+--------------------------------------------------------------------------------------------
+
+4）组合分区
+SQL> drop table range_list_part_tab purge;
+表已删除。
+SQL> --注意，此分区为范围分区
+SQL> create table range_list_part_tab (id number,deal_date date,area_code number,　contents varchar2(4000))
+2          partition by range (deal_date)
+3            subpartition by list (area_code)
+4            subpartition TEMPLATE
+5            (subpartition p_591 values  (591),
+6             subpartition p_592 values  (592),
+7             subpartition p_593 values  (593),
+8             subpartition p_594 values  (594),
+9             subpartition p_595 values  (595),
+10             subpartition p_596 values  (596),
+11             subpartition p_597 values  (597),
+12             subpartition p_598 values  (598),
+13             subpartition p_599 values  (599),
+14             subpartition p_other values (DEFAULT))
+15          (
+16           partition p1 values less than (TO_DATE('2015-02-01', 'YYYY-MM-DD')),
+17           partition p2 values less than (TO_DATE('2015-03-01', 'YYYY-MM-DD')),
+18           partition p3 values less than (TO_DATE('2015-04-01', 'YYYY-MM-DD')),
+19           partition p4 values less than (TO_DATE('2015-05-01', 'YYYY-MM-DD')),
+20           partition p5 values less than (TO_DATE('2015-06-01', 'YYYY-MM-DD')),
+21           partition p6 values less than (TO_DATE('2015-07-01', 'YYYY-MM-DD')),
+22           partition p7 values less than (TO_DATE('2015-08-01', 'YYYY-MM-DD')),
+23           partition p8 values less than (TO_DATE('2015-09-01', 'YYYY-MM-DD')),
+24           partition p9 values less than (TO_DATE('2015-10-01', 'YYYY-MM-DD')),
+25           partition p10 values less than (TO_DATE('2015-11-01', 'YYYY-MM-DD')),
+26           partition p11 values less than (TO_DATE('2015-12-01', 'YYYY-MM-DD')),
+27           partition p12 values less than (TO_DATE('2016-01-01', 'YYYY-MM-DD')),
+28           partition p_max values less than (maxvalue)
+29          )
+30          ;
+表已创建。
+SQL> --以下是插入一整年日期随机数和表示福建地区号含义（591到599）的随机数记录，共有10万条，如下：
+SQL> insert into range_list_part_tab(id,deal_date,area_code,contents)
+2    select rownum,
+3           to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+4           ceil(dbms_random.value(590,599)),
+5           rpad('*',400,'*')
+6      from dual
+7    connect by rownum <= 100000;
+已创建100000行。
+SQL> commit;
+提交完成。
+脚本7-4　组合分区的例子
+
+--------------------------------------------------------------------------------------------
+
+5）分区原理
+SQL> drop table norm_tab purge;
+表已删除。
+SQL> create table norm_tab (id number,deal_date date,area_code number,contents varchar2(4000));
+表已创建。
+SQL> insert into norm_tab(id,deal_date,area_code,contents)
+2    select rownum,
+3           to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+4           ceil(dbms_random.value(590,599)),
+5           rpad('*',400,'*')
+6      from dual
+7    connect by rownum <= 100000;
+已创建100000行。
+SQL> commit;
+提交完成。
+脚本7-5　普通表也插入相同记录
+
+--------------------------------------------------------------------------------------------
+
+普通表和分区表的段的差异
+SQL> SET LINESIZE 666
+SQL> set pagesize 5000
+SQL> column segment_name format a20
+SQL> column partition_name format a20
+SQL> column segment_type format a20
+SQL> select segment_name,
+2         partition_name,
+3         segment_type,
+4         bytes / 1024 / 1024 "字节数(M)",
+5         tablespace_name
+6    from user_segments
+7   where segment_name IN('RANGE_PART_TAB','NORM_TAB');
+脚本7-6　普通表和分区表的段的差异
+
+--------------------------------------------------------------------------------------------
+
+（2）分区优势
+1）减少路径
+分区表查询：
+--观察范围分区表的分区消除带来的性能优势
+set linesize 1000
+set autotrace traceonly
+set timing on
+select *
+from range_part_tab
+where deal_date >= TO_DATE('2015-08-04', 'YYYY-MM-DD')
+and deal_date <= TO_DATE('2015-08-07', 'YYYY-MM-DD');
+脚本7-7　分区表分区消除
+普通表查询：
+--比较相同语句，普通表无法用到DEAL_DATE条件进行分区消除的情况
+select *
+from norm_tab
+where deal_date >= TO_DATE('2015-08-04', 'YYYY-MM-DD')
+and deal_date <= TO_DATE('2015-08-07', 'YYYY-MM-DD');
+脚本7-8　普通表全表扫描
+
+--------------------------------------------------------------------------------------------
+
+2）数据清理
+connect ljb/ljb
+drop table part_tab_trunc purge;
+create table part_tab_trunc (id int,col2 int,col3 int,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (maxvalue)
+)
+;
+insert into part_tab_trunc select rownum ,rownum+1,rownum+2, rpad('*',400,'*') from dual connect by rownum <=50000;
+commit;
+--truncate 分区前
+select count(*) from part_tab_trunc partition(p1);
+
+alter table part_tab_trunc truncate partition p1 ;
+--truncate 分区后
+
+select count(*) from part_tab_trunc partition(p1);
+脚本7-9　分区表数据清理
+
+--------------------------------------------------------------------------------------------
+
+Drop 分区：
+--分区表的drop
+sqlplus ljb/ljb
+drop table part_tab_drop purge;
+create table part_tab_drop (id int,col2 int ,col3 int,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (maxvalue)
+)
+;
+insert into part_tab_drop select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=50000;
+commit;
+--drop 分区前
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_DROP';
+alter table part_tab_drop drop partition p1 ;
+--drop 分区后
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_DROP';
+脚本7-10　分区表drop分区
+
+--------------------------------------------------------------------------------------------
+
+3）操作灵活
+Split分区：
+---分区表的SPLIT
+drop table part_tab_split purge;
+create table part_tab_split (id int,col2 int ,col3 int ,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p_max values less than (maxvalue)
+)
+;
+insert into part_tab_split select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=90000;
+commit;
+--split 分区前
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_SPLIT';
+alter table part_tab_split SPLIT PARTITION P_MAX  at (30000) into (PARTITION p3  ,PARTITION P_MAX);
+alter table part_tab_split SPLIT PARTITION P_MAX  at (40000) into (PARTITION p4  ,PARTITION P_MAX);
+alter table part_tab_split SPLIT PARTITION P_MAX  at (50000) into (PARTITION p5  ,PARTITION P_MAX);
+alter table part_tab_split SPLIT PARTITION P_MAX  at (60000) into (PARTITION p6  ,PARTITION P_MAX);
+alter table part_tab_split SPLIT PARTITION P_MAX  at (70000) into (PARTITION p7  ,PARTITION P_MAX); 
+--split 分区后
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_SPLIT';
+脚本7-11　分区表split分区
+
+--------------------------------------------------------------------------------------------
+
+Add分区：
+drop table part_tab_add purge;
+create table part_tab_add (id int,col2 int,col3 int,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (30000),
+partition p4 values less than (40000),
+partition p5 values less than (50000),
+partition p_max values less than (maxvalue)
+)
+;
+insert into part_tab_add select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=45000;
+commit;
+--add 分区前
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_ADD';
+--注意：必须要把默认分区去掉，再add分区，再增加默认分区,这里可能丢数据!
+alter table part_tab_add  drop partition p_max;
+alter table part_tab_add  add PARTITION p6 values less than (60000);
+alter table part_tab_add  add PARTITION p_max  values less than (maxvalue);
+--add 分区后
+select partition_name, segment_type, bytes
+from user_segments
+where segment_name ='PART_TAB_ADD';
+脚本7-12　分区表ADD分区
+
+--------------------------------------------------------------------------------------------
+
+xchange分区：
+--该操作会导致全局索引失效（要考虑including indexes 或者重建索引），具体见索引章节
+--分区表的exchange
+connect ljb/ljb
+drop table part_tab_exch purge;
+create table part_tab_exch (id int,col2 int,col3 int,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (30000),
+partition p4 values less than (40000),
+partition p5 values less than (50000),
+partition p_max values less than (maxvalue)
+)
+;
+insert into part_tab_exch select rownum ,rownum+1,rownum+2, rpad('*',400,'*') from dual connect by rownum <=60000;
+commit;
+create index idx_part_exch_col2 on part_tab_exch(col2) local;
+create index idx_part_exch_col3 on part_tab_exch (col3);
+--分区表的EXCHANGE（某分区和普通表之间的数据进行交换）
+drop table normal_tab purge;
+create table normal_tab (id int,col2 int,col3 int,contents varchar2(4000));
+create index idx_norm_col2  on normal_tab (col2);
+--交换前数据情况
+select count(*) from normal_tab;
+COUNT(*)
+----------
+0
+select count(*) from part_tab_exch partition(p1);
+COUNT(*)
+----------
+999
+--其中including indexes  可选，为了保证全局索引不要失效
+alter table part_tab_exch exchange partition p1 with table normal_tab including indexes update global indexes;
+--交换后数据情况
+select count(*) from normal_tab;
+COUNT(*)
+----------
+999
+select count(*) from part_tab_exch partition(p1);
+COUNT(*)
+----------
+0
+脚本7-13　分区表EXCHANGE分区
+
+--------------------------------------------------------------------------------------------
+
+（3）其他知识、
+1）分区与rowid
+构造环境：
+set autotrace off
+drop table part_tab_rowid purge;
+create table part_tab_rowid (id int,col2 int,col3 int,contents varchar2(4000))
+partition by range (id)
+(
+partition p1 values less than (10),
+partition p2 values less than (20),
+partition p_max values less than (maxvalue)
+)
+;
+insert into part_tab_rowid select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=30;
+commit;
+select t.id,t.rowid from part_tab_rowid partition (p1) t;
+select t.id,t.rowid from part_tab_rowid partition (p2) t;
+select dbms_rowid.rowid_object('AAAZdQAAGAAATxjAAA') data_object_id#,
+dbms_rowid.rowid_relative_fno('AAAZdQAAGAAATxjAAA') rfile#,
+dbms_rowid.rowid_block_number('AAAZdQAAGAAATxjAAA') block#,
+dbms_rowid.rowid_row_number('AAAZdQAAGAAATxjAAA') row# from dual;
+接下来执行如下：
+--以下这个enable row movement必须操作，否则会出现ORA-014402:更新分区关键字列导致分区更改
+alter table part_tab_rowid   enable row movement;
+update part_tab_rowid set id=12 where id=1;
+commit;
+select t.id,t.rowid from part_tab_rowid partition(p1) t;
+SQL> select t.id,t.rowid from part_tab_rowid partition(p2) t;
+脚本7-14　分区表分区转移与rowid
+
+
+--------------------------------------------------------------------------------------------
+
+2）分区与统计信息
+请看如下：
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'RANGE_PART_TAB',　partname =>'p_201512', estimate_percent => 10,method_opt=>
+'for all indexed columns',cascade=>TRUE) ;
+set linesize 366
+col partition_count format 99999
+col num_rows format 99999999
+col partition_name format a28
+col table_name format a30
+col last_analyzed format date
+---收集完p_201512分区的统计结构后，可以通过如下方式查询到结果：
+select table_name,
+partition_name,
+last_analyzed,
+partition_position,
+num_rows
+from user_tab_statistics t
+where table_name ='RANGE_PART_TAB';
+脚本7-15　分区与统计信息
+
+--------------------------------------------------------------------------------------------
+
+3） 分区相关数据字
+select partitioning_type,
+subpartitioning_type,
+partition_count
+from user_part_tables
+where table_name ='RANGE_PART_TAB';
+脚本7-16　查询分区表信息
+查询分区表哪列建分区
+select sum(bytes) / 1024 / 1024
+from user_segments
+where segment_name ='RANGE_PART_TAB';
+脚本7-18　查询分区表尺寸
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表各分区的大小与分区名
+select partition_name,
+segment_type,
+bytes
+from user_segments
+where segment_name ='RANGE_PART_TAB';
+脚本7-19　查询分区表各分区的大小与分区名
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表统计信息收集情况
+select table_name,
+partition_name,
+last_analyzed,
+partition_position,
+num_rows
+from user_tab_statistics t
+where table_name ='RANGE_PART_TAB'
+脚本7-20　查询分区表统计信息收集情况
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表索引情况
+select table_name,
+index_name,
+last_analyzed,
+blevel,
+num_rows,
+leaf_blocks,
+distinct_keys,
+status
+from user_indexes
+where table_name ='RANGE_PART_TAB';
+脚本7-21　查询分区表索引情况
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表在哪些列有索引
+select index_name,
+column_name,
+column_position
+from user_ind_columns
+where table_name = 'RANGE_PART_TAB';
+脚本7-22　查询分区表在哪些列有索引
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表各索引大小
+select segment_name,segment_type,sum(bytes)/1024/1024
+from user_segments
+where segment_name in
+(select index_name
+from user_indexes
+where table_name ='RANGE_PART_TAB')
+group by segment_name,segment_type ;
+脚本7-23　查询分区表各索引大小
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表索引段的分配情况
+select segment_name
+partition_name,
+segment_type,
+bytes
+from user_segments
+where segment_name in
+(select index_name
+from user_indexes
+where table_name ='RANGE_PART_TAB');
+脚本7-24　查询分区表索引段的分配情况
+
+--------------------------------------------------------------------------------------------
+
+
+查询分区表索引相关统计信息
+select t2.table_name,
+t1.index_name,
+t1.partition_name,
+t1.last_analyzed,
+t1.blevel,
+t1.num_rows,
+t1.leaf_blocks,
+t1.status
+from user_ind_partitions t1, user_indexes t2
+where t1.index_name = t2.index_name
+and t2.table_name='RANGE_PART_TAB';
+脚本7-25　查询分区表索引相关统计信息
+2. 全局临时表
+（1）全局临时表类型
+SQL> drop table t_tmp_session purge;
+表已删除。
+SQL> drop table t_tmp_transaction purge ;
+表已删除。
+SQL> create global temporary table T_TMP_session on commit preserve rows as select  * from dba_objects where 1=2;
+表已创建。
+SQL> select table_name,temporary,duration from user_tables  where table_name='T_TMP_ SESSION';
+SQL> create global temporary table t_tmp_transaction on commit delete rows as select * from dba_objects where 1=2;
+表已创建。
+SQL> select table_name, temporary, DURATION from user_tables  where table_name= 'T_TMP_TRANSACTION';
+脚本7-26　全局临时表的两种类型
+
+--------------------------------------------------------------------------------------------
+
+（2）全局临时表优势
+1）高效删除记录
+SQL> select count(*) from t_tmp_transaction;
+SQL> select * from v_redo_size;
+SQL> insert into t_tmp_transaction select * from dba_objects;
+已创建55721行。
+SQL> select * from v_redo_size;
+SQL> commit;
+提交完成。
+SQL> select * from v_redo_size;
+SQL> select count(*) from t_tmp_transaction;
+脚本7-27　基于事务的全局临时表的数据清理
+基于SESSION的全局临时表的数据清理
+SQL> select * from v_redo_size;
+SQL> insert  into  t_tmp_session select * from dba_objects;
+已创建55721行。
+SQL> select * from v_redo_size;
+SQL> commit;
+提交完成。
+SQL> select count(*) from t_tmp_session;
+SQL> select * from v_redo_size
+脚本7-28　基于SESSION的全局临时表的数据清理
+
+--------------------------------------------------------------------------------------------
+
+
+退出SESSION，再重新连接后，记录还在吗？
+SQL> exit
+C:\Users\ljb>sqlplus ljb/ljb
+SQL> select count(*) from  t_tmp_session;
+2）不同会话独立
+C:\Users\ljb>sqlplus ljb/ljb
+SQL> select * from v$mystat where rownum=1;
+SQL> select * from t_tmp_session;
+未选定行
+SQL> insert  into  t_tmp_session select * from dba_objects;
+已创建55721行。
+SQL> commit;
+提交完成。
+SQL> select count(*) from t_tmp_session;
+再登录一个SID=973的新连接
+C:\Users\ljb>sqlplus ljb/ljb
+SQL> select * from v$mystat where rownum=1;
+SQL> select count(*) from t_tmp_session;
+SQL> insert into t_tmp_session select * from  dba_objects where rownum=1;
+已创建 1 行。
+SQL> commit;
+提交完成。
+SQL> select count(*) from t_tmp_session;
+脚本7-29　全局临时表不同的session数据独立
+
+--------------------------------------------------------------------------------------------
+
+
+7.2.2　其他补充
+2. 压缩的技术
+（1）表的压缩
+未压缩前：
+DROP TABLE t purge;
+CREATE TABLE t NOCOMPRESS AS
+SELECT rownum AS n, rpad(' ',500,mod(rownum,15)) AS pad
+FROM dual
+CONNECT BY level <= 200000;
+execute dbms_stats.gather_table_stats(ownname=>user, tabname=>'t');
+--未压缩的表当前情况
+SELECT table_name, blocks,compression  FROM user_tables WHERE table_name = 'T';
+select count(*) from t;
+脚本7-30　表压缩前的逻辑读
+
+--------------------------------------------------------------------------------------------
+
+
+压缩后：
+set autotrace off
+ALTER TABLE t MOVE COMPRESS;
+execute dbms_stats.gather_table_stats(ownname=>user, tabname=>'t');
+SELECT table_name, blocks,compression  FROM user_tables WHERE table_name = 'T';
+select count(*) from t;
+脚本7-31　表压缩后的逻辑读
+
+--------------------------------------------------------------------------------------------
+
+
+（2）索引压缩
+环境准备：
+DROP TABLE t1 purge;
+CREATE TABLE t1 AS select * from dba_objects;
+alter table T1 modify owner not null;
+alter table T1 modify object_name not null;
+alter table T1 modify object_type not null;
+insert  into t1 select * from t1;
+insert  into t1 select * from t1;
+commit;
+create index idx1_object_union  on t1(owner,object_type,object_name);
+execute dbms_stats.gather_index_stats(ownname=>user, indname=>'idx1_object_union');
+未压缩索引的当前情况：
+SELECT t.index_name,t.compression,t.leaf_blocks,t.blevel  FROM user_indexes t WHERE index_name = 'IDX1_OBJECT_UNION';
+开始压缩索引：
+drop table t2 purge;
+create table t2 as select * from t1;
+alter table T2 modify owner not null;
+alter table T2 modify object_name not null;
+alter table T2 modify object_type not null;
+create index idx2_object_union  on t2(owner,object_type,object_name);
+ALTER index  idx2_object_union  rebuild  COMPRESS;
+execute dbms_stats.gather_index_stats(ownname=>user, indname=>'idx2_object_union');
+SELECT t.index_name,t.compression,t.leaf_blocks,t.blevel  FROM user_indexes t WHERE index_name = 'IDX2_OBJECT_UNION';
+接下来比较一下两者的性能差异，首先是未压缩索引：
+set linesize 1000
+set autotrace traceonly
+select count(*) from t1 ;
+脚本7-32　索引压缩前的逻辑读
+
+--------------------------------------------------------------------------------------------
+
+
+接下来是压缩索引：
+select count(*) from t2 ;
+脚本7-33　索引压缩后的逻辑读
+
+--------------------------------------------------------------------------------------------
+
+
+3. 列类型优化
+（1）什么列放什么值
+drop table t_col_type purge;
+create table t_col_type(id varchar2(20),col2 varchar2(20),col3 varchar2(20));
+insert into t_col_type select rownum,'abc','efg' from dual connect by level<=10000;
+commit;
+create index idx_id on t_col_type(id);
+set linesize 1000
+set autotrace traceonly
+select * from t_col_type where id=6;
+脚本7-34　访问索引列无法用到索引
+
+--------------------------------------------------------------------------------------------
+
+
+调整写法索引列才用到索引
+select * from t_col_type where id='6';
+脚本7-35　调整写法索引列才用到索引
+
+--------------------------------------------------------------------------------------------
+
+
+7.3　相关优化案例分析
+3. 数据进默认分区与性能优化
+create table range_part_tab (id number,deal_date date,area_code number,nbr number,　contents varchar2(4000))
+partition by range (deal_date)
+(
+partition p_201501 values less than (TO_DATE('2015-02-01', 'YYYY-MM-DD')),
+partition p_201502 values less than (TO_DATE('2015-03-01', 'YYYY-MM-DD')),
+partition p_201503 values less than (TO_DATE('2015-04-01', 'YYYY-MM-DD')),
+partition p_201504 values less than (TO_DATE('2015-05-01', 'YYYY-MM-DD')),
+partition p_201505 values less than (TO_DATE('2015-06-01', 'YYYY-MM-DD')),
+partition p_201506 values less than (TO_DATE('2015-07-01', 'YYYY-MM-DD')),
+partition p_201507 values less than (TO_DATE('2015-08-01', 'YYYY-MM-DD')),
+partition p_max values less than (maxvalue)
+);
+插入数据：
+insert into range_part_tab (id,deal_date,area_code,nbr,contents)
+select rownum,
+to_date( to_char(sysdate-365,'J')+TRUNC(DBMS_RANDOM.VALUE(0,365)),'J'),
+ceil(dbms_random.value(591,599)),
+ceil(dbms_random.value(18900000001,18999999999)),
+rpad('*',400,'*')
+from dual
+connect by rownum <= 100000;
+commit;
+
+--------------------------------------------------------------------------------------------
+
+经常有类似如下的案例:
+SQL> select count(*) from range_part_tab partition (p_201501);
+SQL> select count(*) from range_part_tab partition (p_201502);
+SQL> select count(*) from range_part_tab partition (p_201503);
+SQL> select count(*) from range_part_tab partition (p_201504);
+SQL> select count(*) from range_part_tab partition (p_201505);
+SQL> select count(*) from range_part_tab partition (p_201506);
+SQL> select count(*) from range_part_tab partition (p_201507);
+SQL> select count(*) from range_part_tab partition (p_max);
+
+--------------------------------------------------------------------------------------------
+
+4. 缘何分区表性能比普通表性能差
+drop table part_tab purge;
+create table part_tab (id int,col2 int,col3 int)
+partition by range (id)
+(
+partition p1 values less than (10000),
+partition p2 values less than (20000),
+partition p3 values less than (30000),
+partition p4 values less than (40000),
+partition p5 values less than (50000),
+partition p6 values less than (60000),
+partition p7 values less than (70000),
+partition p8 values less than (80000),
+partition p9 values less than (90000),
+partition p10 values less than (100000),
+partition p11 values less than (maxvalue)
+)
+;
+insert into part_tab select rownum,rownum+1,rownum+2 from dual connect by rownum <=110000;
+commit;
+create  index idx_par_tab_col2 on part_tab(col2) local;
+create  index idx_par_tab_col3 on part_tab(col3) ;
+--构造普通表，表结构和数据量都与分区表一样。
+drop table norm_tab purge;
+create table norm_tab  (id int,col2 int,col3 int);
+insert into norm_tab select rownum,rownum+1,rownum+2 from dual connect by rownum <=110000;
+commit;
+create  index idx_nor_tab_col2 on norm_tab(col2) ;
+create  index idx_nor_tab_col3 on norm_tab(col3) ;
+
+--------------------------------------------------------------------------------------------
+
+第1组试验，首先查看分区表的性能：
+select * from part_tab where col2=8 ;
+再查看普通表的性能：
+select * from norm_tab where col2=8 ;
+为什么走普通表的索引居然比走分区表的local索引性能要好？
+SQL> set timing on
+SQL> set autotrace off
+SQL> select index_name,
+2            blevel,
+3            leaf_blocks,
+4            num_rows,
+5            distinct_keys,
+6            clustering_factor
+7       from user_ind_statistics
+8      where table_name in( 'NORM_TAB');
+SQL>     select index_name,
+2            blevel,
+3            leaf_blocks,
+4            num_rows,
+5            distinct_keys,
+6            clustering_factor FROM USER_IND_PARTITIONS where index_name like 'IDX_PAR_TAB%';
+脚本7-36　使用分区表性能比普通表还更差的场景
+
+--------------------------------------------------------------------------------------------
+
+
+7.3.2　全局临时表案例
+1. 统计信息引发性能血案
+环境准备：
+DROP TABLE t1 CASCADE CONSTRAINTS PURGE;
+DROP TABLE t2 CASCADE CONSTRAINTS PURGE;
+CREATE TABLE t1 (
+id NUMBER NOT NULL,
+n NUMBER,
+contents VARCHAR2(4000)
+)
+;
+CREATE global temporary table t2 (
+id NUMBER NOT NULL,
+t1_id NUMBER NOT NULL,
+n NUMBER,
+contents VARCHAR2(4000)
+) on commit preserve rows
+;
+execute dbms_random.seed(0);
+INSERT INTO t1
+SELECT  rownum,  rownum, dbms_random.string('a', 50)
+FROM dual
+CONNECT BY level <= 10
+ORDER BY dbms_random.random;
+INSERT INTO t2 SELECT rownum, rownum, rownum, dbms_random.string('b', 50) FROM dual CONNECT BY level <= 100000
+ORDER BY dbms_random.random;
+COMMIT;
+select count(*) from t1;
+select count(*) from t2;
+
+--------------------------------------------------------------------------------------------
+
+正常的执行计划如下：
+set linesize 1000
+alter session set statistics_level=all ;
+SELECT *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+--------------------------------------------------------------------------------------------
+
+收集全局临时表T2表的统计信息，如下： 
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T2',estimate_percent => 10,method_opt=> 'for all indexed
+columns',cascade=>TRUE) ;
+PL/SQL 过程已成功完成。
+select table_name,
+partition_name,
+last_analyzed,
+partition_position,
+num_rows
+from user_tab_statistics t
+where table_name ='T2';
+然后回到刚才的Session:
+set linesize 1000
+alter session set statistics_level=all ;
+SELECT *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本7-37　全局临时表收集统计信息导致Oracle执行计划错误
+
+--------------------------------------------------------------------------------------------
+
+2. 各接口程序的经典优化
+create global temporary table t_global on commit preserve rows as select  * from dba_objects where 1=2;
+select table_name,temporary,duration from user_tables  where table_name='T_GLOBAL';
+--不同session的例子，只试验一个基于sesssion 的临时表就可以了，不用试验另外一个了。
+---连上session 1(比如是业务1的进程）
+connect ljb/ljb
+insert into t_global select * from dba_objects　where rownum<=10;
+--可以体会提交，基于session 的提交并清理数据
+commit;
+select count(*) from t_global;
+继续登录session 2(比如是业务2的进程）
+connect yxl/yxl
+insert into t_global select * from dba_objects　where rownum<=20;
+commit;
+select count(*) from t_global;
+
+--------------------------------------------------------------------------------------------
+
+
+3. 字段设计与空间换时间
+SELECT *
+FROM t1           a,
+t_global_tab b,
+t2           c,
+t3           d,
+t4           e,
+t5           f,
+...
+WHERE a.id=b.id
+and ...
+and ...
+
+--------------------------------------------------------------------------------------------
+
+
+4. 与日志暴增相关的故障
+环境准备：
+
+---试验准备工作，建观察redo的视图
+sqlplus "/ as sysdba"
+
+grant all on v_$mystat to ljb;
+grant all on v_$statname to ljb;
+connect  ljb/ljb
+drop table t purge;
+create table t as select * from dba_objects ;
+--以下创建视图，方便后续直接用select * from v_redo_size进行查询
+create or replace view v_redo_size as
+select a.name,b.value
+from v$statname a,v$mystat b
+where a.statistic#=b.statistic#
+and a.name='redo size';
+
+--------------------------------------------------------------------------------------------
+
+方案1
+drop table t_tmp purge;
+create table t_tmp (id int,col2 int ,col3 int,contents varchar2(4000));
+select * from v_redo_size;
+begin
+insert into t_tmp select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=10000;
+--临时插入t_tmp表后，接下来删除该临时表记录，中间略去了大部分逻辑
+delete from t_tmp ;
+commit;
+end;
+/
+select * from v_redo_size;
+
+--------------------------------------------------------------------------------------------
+
+
+方案2
+--退出session,连到新的session上完成如下操作：
+drop table t_global purge;
+create global temporary table t_global (id int,col2 int ,col3 int,contents varchar2(4000)) on commit delete rows;
+select * from v_redo_size;
+begin
+insert into t_global select rownum ,rownum+1,rownum+2,rpad('*',400,'*') from dual connect by rownum <=10000;
+--临时插入t_global表后，如下删除临时表记录的delete动作可以不做，commit后数据自动清理
+--delete from t_global ;
+commit;
+end;
+/
+select * from v_redo_size;
+脚本7-38　全局临时表减少大量日志，优化了生产系统
+
+--------------------------------------------------------------------------------------------
+
+7.3.3　监控异常的表设计
+1. 监控分区表相关设计
+（1）监控失效分区索引
+prompt <p>查询当前用户下，失效-普通索引
+select t.index_name,
+t.table_name,
+blevel,
+t.num_rows,
+t.leaf_blocks,
+t.distinct_keys
+from user_indexes t
+where status = 'INVALID';
+prompt <p>查询当前用户下，失效-分区索引
+select t1.blevel,
+t1.leaf_blocks,
+t1.INDEX_NAME,
+t2.table_name,
+t1.PARTITION_NAME,
+t1.STATUS
+from user_ind_partitions t1, user_indexes t2
+where t1.index_name = t2.index_name
+and t1.STATUS = 'UNUSABLE';
+脚本7-39　监控失效分区索引
+
+--------------------------------------------------------------------------------------------
+
+
+（2）监控未建分区的大表
+prompt <p>当前用户下，表大小超过10个GB未建分区的
+select segment_name,
+segment_type,
+sum(bytes) / 1024 / 1024 / 1024 object_size
+from user_segments
+WHERE segment_type = 'TABLE'
+group by  segment_name, segment_type
+having sum(bytes) / 1024 / 1024 / 1024 >= 10
+order by object_size desc;
+脚本7-40　监控未建分区的大表
+
+--------------------------------------------------------------------------------------------
+
+
+（3）监控分区数过多的表
+prompt <p>当前用户下，分区最多的前10个对象
+select *
+from (select  table_name, count(*) cnt
+from user_tab_partitions
+group by  table_name
+order by cnt desc)
+where rownum <= 10;
+prompt <p>当前用户下，分区个数超过100的表
+select  table_name, count(*) cnt
+from user_tab_partitions
+having count(*) >= 100
+group by table_name, table_name
+order by cnt desc;
+--或者如下更方便
+select table_name, partitioning_type, subpartitioning_type
+from user_part_tables
+where partition_count > 100;
+脚本7-41　监控分区数过多的表
+
+--------------------------------------------------------------------------------------------
+
+（4）监控分区表各分区大小严重不均匀情况
+set linesize 266
+col table_name format a20
+select table_name,
+max(num_rows),
+trunc(avg(num_rows),0),
+sum(num_rows),
+case when sum(num_rows),0 then 0,else trunc(max(num_rows) / sum(num_rows),2) end,
+count(*)
+from user_tab_partitions
+group by table_name
+having max(num_rows) / sum(num_rows) > 2 / count(*);
+也可用来作为判断查询当前用户下有因为疏于分区管理导致大量数据进了默认分区的参考。
+select table_name,
+partition_name,
+num_rows
+from user_tab_partitions
+where table_name = 'RANGE_PART_TAB'
+order by num_rows desc;
+脚本7-42　监控分区表各分区大小严重不均匀情况
+
+--------------------------------------------------------------------------------------------
+
+
+（5）监控当前有多少带子分区的分区表
+select table_name,
+partitioning_type,
+subpartitioning_type,
+partition_count
+from user_part_tables
+where subpartitioning_type <> 'NONE';
+select count(*) from user_part_tables where  subpartitioning_type <> 'NONE';
+脚本7-43　监控当前有多少带子分区的分区表
+
+--------------------------------------------------------------------------------------------
+
+
+2. 监控哪些全局临时表被收集统计信息
+prompt <p>当前用户下，被收集统计信息的临时表
+select owner,
+table_name,
+t.last_analyzed,
+t.num_rows,
+t.blocks
+from user_tables t
+where t.temporary = 'Y'
+and last_analyzed is not null;
+脚本7-44　监控哪些全局临时表被收集统计信息
+
+--------------------------------------------------------------------------------------------
+
+
+3. 监控哪些外键未建索引
+--查看当前数据库哪些对象外键没建索引
+select table_name,
+constraint_name,
+cname1 || nvl2(cname2, ',' || cname2, null) ||
+nvl2(cname3, ',' || cname3, null) ||
+nvl2(cname4, ',' || cname4, null) ||
+nvl2(cname5, ',' || cname5, null) ||
+nvl2(cname6, ',' || cname6, null) ||
+nvl2(cname7, ',' || cname7, null) ||
+nvl2(cname8, ',' || cname8, null) columns
+from (select b.table_name,
+b.constraint_name,
+max(decode(position, 1, column_name, null)) cname1,
+max(decode(position, 2, column_name, null)) cname2,
+max(decode(position, 3, column_name, null)) cname3,
+max(decode(position, 4, column_name, null)) cname4,
+max(decode(position, 5, column_name, null)) cname5,
+max(decode(position, 6, column_name, null)) cname6,
+max(decode(position, 7, column_name, null)) cname7,
+max(decode(position, 8, column_name, null)) cname8,
+count(*) col_cnt
+from (select substr(table_name, 1, 30) table_name,
+substr(constraint_name, 1, 30) constraint_name,
+substr(column_name, 1, 30) column_name,
+position
+from user_cons_columns) a,
+user_constraints b
+where a.constraint_name = b.constraint_name
+and b.constraint_type = 'R'
+group by b.table_name, b.constraint_name) cons
+where col_cnt > ALL
+(select count(*)
+from user_ind_columns i
+where i.table_name = cons.table_name
+and i.column_name in (cname1, cname2, cname3, cname4, cname5,
+cname6, cname7, cname8)
+and i.column_position <= cons.col_cnt
+group by i.index_name)
+脚本7-45　监控哪些外键未建索引
+
+--------------------------------------------------------------------------------------------
+
+
+查询所有含外键的表：
+select count(*),TABLE_NAME,c_constraint_name from (
+select a.table_name,
+substr(a.constraint_name, 1, 30) c_constraint_name,
+substr(a.column_name, 1, 30) column_name,
+position,
+b.owner,
+b.constraint_name,
+b.constraint_type
+from user_cons_columns a, user_constraints b
+where a.constraint_name = b.constraint_name
+and b.constraint_type = 'R' )
+group by TABLE_NAME,c_constraint_name
+脚本7-46　查询所有含外键的表
+
+--------------------------------------------------------------------------------------------
+
+
+4. 监控表中有没有过时类型的字段
+select table_name,
+column_name,
+data_type
+from user_tab_columns
+where data_type in ( 'LONG','CHAR');
+脚本7-47　监控表中有没有过时类型的字段
