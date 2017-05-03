@@ -1,0 +1,552 @@
+
+第11章　且慢，表连接的秘密让SQL飞
+
+11.2　各类型表连接的知识要点
+11.2.1　从表的访问次数探索
+环境准备。
+DROP TABLE t1 CASCADE CONSTRAINTS PURGE;
+DROP TABLE t2 CASCADE CONSTRAINTS PURGE;
+CREATE TABLE t1 (
+id NUMBER NOT NULL,
+n NUMBER,
+contents VARCHAR2(4000)
+)
+;
+CREATE TABLE t2 (
+id NUMBER NOT NULL,
+t1_id NUMBER NOT NULL,
+n NUMBER,
+contents VARCHAR2(4000)
+)
+;
+execute dbms_random.seed(0);
+INSERT INTO t1
+SELECT  rownum,  rownum, dbms_random.string('a', 50)
+FROM dual
+CONNECT BY level <= 100
+ORDER BY dbms_random.random;
+INSERT INTO t2 SELECT rownum, rownum, rownum, dbms_random.string('b', 50) FROM dual CONNECT BY level <= 100000
+ORDER BY dbms_random.random;
+COMMIT;
+SQL> select count(*) from t1;
+SQL> select count(*) from t2;
+脚本11-1　研究表连接性能前的环境准备
+
+
+--------------------------------------------------------------------------------------------
+
+
+1. 表的访问次数之NL连接研究
+语句1
+Set linesize 1000
+alter session set statistics_level=all ;
+SELECT /*+ leading(t1) use_nl(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+--略去记录结果
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+select count(*) from t1;
+
+脚本11-2　NL研究，T2表被访问100次及其原因
+
+
+--------------------------------------------------------------------------------------------
+
+
+语句2
+Set linesize 1000
+alter session set statistics_level=all ;
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n in(17, 19);
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-3　NL研究，T2表被访问2次及其原因
+
+
+--------------------------------------------------------------------------------------------
+
+
+语句3
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 999999999;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-4　NL研究，T2表被访问0次
+
+
+--------------------------------------------------------------------------------------------
+
+语句4
+---到最后，不只是t2表被访问0次，连t1表也访问0次
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND 1=2;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-5　NL研究，T2表和T1表皆无访问
+
+
+--------------------------------------------------------------------------------------------
+
+2. 表的访问次数之HASH连接研究
+分别证明这些结论：
+--Hash Join中 t2表只会被访问1次或0次(驱动表被访问1次，被驱动表被访问1次）
+set linesize 1000
+SELECT /*+ leading(t1) use_hash(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+--Hash Join中t2表被访问0次的情况
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=999999999;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+--Hash Join中t1和t2表都被访问0次的情况
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and 1=2;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-6　表的访问次数之HASH连接研究
+
+
+--------------------------------------------------------------------------------------------
+
+3. 表的访问次数之排序合并连接研究
+11.2.2　表驱动顺序与性能
+1. 表驱动顺序与性能之Nested Loops Join
+set linesize 1000
+alter session set statistics_level=all;
+SELECT /*+ leading(t1) use_nl(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-7　Nested Loops Join的T1表先访问的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+--Nested Loops Join的t2表先被访问的情况
+alter session set statistics_level=all;
+SELECT /*+ leading(t2) use_nl(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-8　Nested Loops Join的T2表先访问的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 表驱动顺序与性能之Hash Join
+set linesize 1000
+alter session set statistics_level=all;
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-9　Hash Join的T1表先访问情况
+
+
+--------------------------------------------------------------------------------------------
+
+接下来看 T2表先驱动的情况
+set linesize 1000
+SELECT /*+ leading(t2) use_hash(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-10　Hash Join的T2表先访问情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. 表驱动顺序与性能之Merge Sort Join
+set linesize 1000
+alter session set statistics_level=all;
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-11　Merge Sort Join的T1表先访问情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+接下来看 T2表先驱动的情况：
+--Merge Sort Join的t2表先被访问的情况
+set linesize 1000
+SELECT /*+ leading(t2) use_merge(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-12　Merge Sort Join的T2表先访问情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+11.2.3　表连接是否有排序
+1. 表连接是否有排序之Nested Loops Join
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_nl(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+脚本11-13　表连接是否有排序之Nested Loops Join
+
+
+--------------------------------------------------------------------------------------------
+
+
+2. 表连接是否有排序之Hash Join
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+脚本11-14　表连接是否有排序之Hash Join
+
+
+--------------------------------------------------------------------------------------------
+
+
+3. 表连接是否有排序之Merge Sort Join
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+脚本11-15　表连接是否有排序之Merge Sort Join
+
+
+--------------------------------------------------------------------------------------------
+
+11.2.4　各连接的使用限制
+1. 各连接的使用限制之Hash Join
+语句1
+set linesize 1000
+set autotrace traceonly explain
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id > t2.t1_id
+AND t1.n = 19;
+
+
+--------------------------------------------------------------------------------------------
+
+语句2
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id < t2.t1_id
+AND t1.n = 19;
+脚本11-16　Hash Join不支持大于或者小于的连接条件
+
+--------------------------------------------------------------------------------------------
+
+
+语句3
+SELECT /*+ leading(t1) use_hash(t2)*/ *
+FROM t1, t2
+WHERE t1.id <> t2.t1_id
+AND t1.n = 19;
+脚本11-17　Hash Join不支持不等值连接条件
+
+--------------------------------------------------------------------------------------------
+
+2. 各连接的使用限制之排序合并连接
+set linesize 1000
+set autotrace traceonly explain
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id > t2.t1_id
+AND t1.n = 19;
+脚本11-18　Merge Sort Join支持大于或者小于的连接条件
+
+--------------------------------------------------------------------------------------------
+
+语句2
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id <> t2.t1_id
+AND t1.n = 19;
+脚本11-19　Merge Sort Join不支持不等于的连接条件
+
+--------------------------------------------------------------------------------------------
+
+
+语句3
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id like t2.t1_id
+AND t1.n = 19;
+脚本11-20　Merge Sort Join不支持LIKE的连接条件
+
+--------------------------------------------------------------------------------------------
+
+
+11.3.1　一次Nested Loops Join的优化全过程
+菜刀1:
+set linesize 1000
+set autotrace off
+alter session set statistics_level=all ;
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-21　Nested Loops Join两表无索引试验
+
+--------------------------------------------------------------------------------------------
+
+
+对驱动表（t1表）的限制条件建索引：
+CREATE INDEX t1_n ON t1 (n);
+---有了限制条件的索引，Nested Loops Join性能略有提升
+set linesize 1000
+alter session set statistics_level=all ;
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-22　Nested Loops Join，对驱动表限制条件建索引
+
+--------------------------------------------------------------------------------------------
+
+
+菜刀2
+CREATE INDEX t2_t1_id ON t2(t1_id);
+----表连接性能有了大幅度提升
+alter session set statistics_level=all ;
+SELECT /*+ leading(t1) use_nl(t2) */ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-23　Nested Loops Join，对被驱动表连接条件建索引
+
+--------------------------------------------------------------------------------------------
+
+终于自己去选择Nested Loops Join了
+alter session set statistics_level=all ;
+SELECT *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n = 19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-24　条件完善自动走Nested Loops Join
+
+--------------------------------------------------------------------------------------------
+
+11.3.2　一次Hash Join 的 优化全过程
+第1斧：
+alter session set statistics_level=all ;
+set linesize 1000
+SELECT /*+ leading(t2) use_hash(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-25　Hash Join两表限制条件皆无索引
+
+--------------------------------------------------------------------------------------------
+
+限制条件建索引的情况测试
+create index idx_t1_n on t1(n);
+SELECT /*+ leading(t2) use_hash(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-26　Hash Join驱动表限制条件有索引
+
+--------------------------------------------------------------------------------------------
+
+对t2表的限制条件再建索引
+create index idx_t2_n on t2(n);
+SELECT /*+ leading(t2) use_hash(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-27　Hash Join被驱动表限制条件有索引
+
+--------------------------------------------------------------------------------------------
+
+
+第2斧：
+set linesize 1000
+alter session set statistics_level=all;
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-28　无索引且全扫描，一般走Hash Join 
+
+--------------------------------------------------------------------------------------------
+
+
+以下是经常出现的案例
+EXEC  dbms_stats.set_table_stats(user, 'T1', numrows => 20000000  ,numblks => 1000000);
+EXEC  dbms_stats.set_table_stats(user, 'T2', numrows => 1  ,numblks => 1);
+
+--------------------------------------------------------------------------------------------
+
+继续做试验如下
+set linesize 1000
+alter session set statistics_level=all;
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-29　感受set_table_stats骗过Oracle的方式
+
+--------------------------------------------------------------------------------------------
+
+11.3.3　一次 Merge Sort Join 的优化全过程
+第1式
+alter session set statistics_level=all ;
+set linesize 1000
+SELECT /*+ leading(t2) use_merge(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-30　Merge Sort Join两表限制条件皆无索引
+
+--------------------------------------------------------------------------------------------
+
+首先对t1表的限制条件建索引
+create index idx_t1_n on t1(n);
+SELECT /*+ leading(t2) use_merge(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-31　Merge Sort Join中T1表限制条件有索引
+
+--------------------------------------------------------------------------------------------
+
+对t2表的限制条件建索引
+create index idx_t2_n on t2(n);
+SELECT /*+ leading(t2) use_merge(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19
+and t2.n=12;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-32　Merge Sort Join中T2表限制条件有索引
+
+--------------------------------------------------------------------------------------------
+
+
+第2式
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+
+--------------------------------------------------------------------------------------------
+
+接下来在t1表建索引，发现排序消除了一个：
+CREATE INDEX idx_t1_id ON t1(id);
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+
+
+--------------------------------------------------------------------------------------------
+
+接下来在t2表的连接条件建索引：
+CREATE INDEX idx_t2_t1_id ON t2(t1_id);
+set linesize 1000
+set autotrace traceonly
+SELECT /*+ leading(t1) use_merge(t2)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id;
+脚本11-33　Merge Sort Join中消除排序的思路
+
+
+--------------------------------------------------------------------------------------------
+
+第3式
+Merge Sort Join取所有字段的情况：
+alter session set statistics_level=all ;
+set linesize 1000
+SELECT /*+ leading(t2) use_merge(t1)*/ *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-34　Merge Sort Join中取所有字段的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+Merge Sort Join取部分字段的情况：
+SELECT /*+ leading(t2) use_merge(t1)*/ t1.id
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+and t1.n=19;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本11-35　Merge Sort Join中取部分字段的情况
+
+
+--------------------------------------------------------------------------------------------
+
+
+若NL连接应用不当，会导致致命的问题
+from (select a.alarm_title,
+--略去其他字段
+from ne_alarm_list a
+where  a.alarm_type = 20
+and a.alarm_Level in ('1', '2')
+and a.alarm_state in (0)
+and a.last_send_time >= TO_DATE('&P_DATE_BEGIN' || ' 00:00:00', 'YYYY-MM-DD hh24:mi:ss')
+and a.last_send_time <= TO_DATE('&P_DATE_END' || ' 23:59:59', 'YYYY-MM-DD hh24:mi:ss')
+) a1,
+manage_region b,
+net_element d,
+(select *
+from tp_domain_listvalues
+where domain_code LIKE 'DOMAIN_ALARM_STATE%') f,
+kpi_code_list g,
+ne_alarm_msg_source_rela h,
+net_element k,
+manage_region l
+where a1.alarm_region_origin = b.region_id(+)
+and a1.ne_id = d.ne_id
+--and instr(d.path, :P_NE_ID, 1, 1) > 0
+and a1.alarm_state = f.list_value
+and a1.kpi_id = g.kpi_id
+and a1.ne_alarm_list_id = h.ne_alarm_msg_id
+and h.source_type = '19'
+and h.source_id = k.ne_id
+and k.region_id = l.region_id
+and l.region_id in ('&PSOURCE_REGION')
+order by a1.alarm_state, a1.create_time desc
