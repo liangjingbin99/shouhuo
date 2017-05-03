@@ -1,0 +1,588 @@
+
+第15章　动手，分析函数让SQL飞
+
+2017-04-16 梁 运维小盆友
+15.1　高级SQL之分析函数
+15.1.2　特别之处
+环境如下：
+drop table emp purge;
+CREATE TABLE emp
+(
+emp_id    NUMBER(6),
+ename  VARCHAR2(45),
+dept_id   NUMBER(4),
+hire_date DATE,
+sal    NUMBER(8,2)
+);
+--创建emp数据
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (101, 'Tom',    20,  TO_DATE
+('21-09-1989', 'DD-MM-YYYY'), 2000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (102, 'Mike',   20,  TO_DATE
+('13-01-1993', 'DD-MM-YYYY'), 8000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (120, 'John',   50,  TO_DATE
+('18-07-1996', 'DD-MM-YYYY'), 1000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (121, 'Joy',    50,  TO_DATE
+('10-04-1997', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (122, 'Rich',   50,  TO_DATE
+('01-05-1995', 'DD-MM-YYYY'), 3000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (123, 'Kate',   50,  TO_DATE
+('10-10-1997', 'DD-MM-YYYY'), 5000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (124, 'Jess',   50,  TO_DATE
+('16-11-1999', 'DD-MM-YYYY'), 6000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (100, 'Stev',   10,  TO_DATE
+('01-01-1990', 'DD-MM-YYYY'), 7000);
+COMMIT;
+set linesize 2000
+set pagesize 2000
+col emp_id format 999
+col dept_id format 99
+col ename format a5
+
+--------------------------------------------------------------------------------------------
+
+语句1
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date) sum_sal,
+SUM(sal) OVER (PARTITION BY dept_id ) sum_sal2,
+SUM(sal) OVER ( ) sum_sal3
+FROM emp;
+语句2
+SELECT dept_id ,SUM(sal) FROM emp GROUP BY dept_id ORDER BY  dept_id;
+15.2.1　学习详解
+
+--------------------------------------------------------------------------------------------
+
+1. 开窗部分
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+-- 以下均为首先按dept_id进行分组，其次按照hire_date进行排序，且所有统计不能跨越其所在分区，故
+不再重复
+-- 窗口范围为该分区的第一行到该分区的最后一行，与sum_sal_part等同
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date   ROWS BETWEEN UNBOUNDED PRECEDING AND
+UNBOUNDED FOLLOWING) sum_1_to_last,
+-- 窗口范围为该分区的第一行到本行，与sum_sal_part_order等同
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date   ROWS BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW) sum_1_to_cur,
+-- 窗口范围为该分区的第一行到本行前一行，统计的是第一行到本行前一行薪资的累计
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date   ROWS BETWEEN UNBOUNDED PRECEDING AND
+1/*value_expr*/ PRECEDING) sum_1_to_curbef1,
+-- 窗口范围为该分区的第一行到本行后一行，统计的是第一行到本行后一行薪资的累计
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date   ROWS BETWEEN UNBOUNDED PRECEDING AND
+1 FOLLOWING) sum_1_to_curaft1
+FROM emp order by dept_id,hire_date;
+脚本15-1　分析函数开窗分解之ROWS
+
+--------------------------------------------------------------------------------------------
+
+（2）开窗分解之RANGE
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+-- 后面均为以dept_id分组，再按hire_date排序，且所有统计不能跨分区，由于是逻辑范围，因此
+PRECEDING和FOLLOWING表达式有符号
+-- 窗口范围为该分区的第一行到该分区的最后一行，与sum_sal_part等同,在非条件表达式中等同于ROWS
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY sal  RANGE BETWEEN UNBOUNDED PRECEDING AND
+UNBOUNDED FOLLOWING) sum_1_to_last,
+-- 窗口范围为该分区的第一行到本行，与sum_sal_part_order等同,在非条件表达式中等同于ROWS
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY sal  RANGE BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW) sum_1_to_cur,
+-- 窗口范围为该分区内小于本记录sal少2500的所有的薪资累计
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY sal RANGE BETWEEN UNBOUNDED PRECEDING AND
+2500/*value_expr*/ PRECEDING) sum1,
+-- 窗口范围为该分区内小于本记录sal多2500的所有薪资累计
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY sal RANGE BETWEEN UNBOUNDED PRECEDING AND
+2500/*value_expr*/ FOLLOWING) sum2
+FROM emp;
+脚本15-2　分析函数开窗分解之RANGE
+
+--------------------------------------------------------------------------------------------
+
+
+（3）开窗分解之KEEP
+SELECT emp_id,ename,dept_id,hire_date,sal,
+DENSE_RANK() OVER(PARTITION BY dept_id ORDER BY sal) DENSE_RANK,
+MIN(hire_date) KEEP (DENSE_RANK FIRST ORDER BY sal) OVER(PARTITION BY dept_id) min_first,
+MIN(hire_date) KEEP (DENSE_RANK LAST ORDER BY sal) OVER(PARTITION BY dept_id) min_last,
+MAX(hire_date) KEEP (DENSE_RANK FIRST ORDER BY sal) OVER(PARTITION BY dept_id) max_first,
+MAX(hire_date) KEEP (DENSE_RANK LAST ORDER BY sal) OVER(PARTITION BY dept_id) max_last
+FROM emp;
+脚本15-3　分析函数开窗分解之KEEP
+
+--------------------------------------------------------------------------------------------
+
+
+2. 函数部分（针对排序函数）
+准备环境：
+drop table emp purge;
+CREATE TABLE emp
+(
+emp_id    NUMBER(6),
+ename  VARCHAR2(45),
+dept_id   NUMBER(4),
+hire_date DATE,
+sal    NUMBER(8,2)
+);
+--创建emp数据
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (101, 'Tom',    20,  TO_DATE
+('21-09-1989', 'DD-MM-YYYY'), 2000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (102, 'Mike',   20,  TO_DATE
+('13-01-1993', 'DD-MM-YYYY'), 8000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (120, 'John',   50,  TO_DATE
+('18-07-1996', 'DD-MM-YYYY'), 1000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (121, 'Joy',    50,  TO_DATE
+('10-04-1997', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (122, 'Rich',   50,  TO_DATE
+('01-05-1995', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (123, 'Kate',   50,  TO_DATE
+('10-10-1997', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (124, 'Jess',   50,  TO_DATE
+('16-11-1999', 'DD-MM-YYYY'), 6000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (100, 'Stev',   10,  TO_DATE
+('01-01-1990', 'DD-MM-YYYY'), 7000);
+COMMIT;
+set linesize 2000
+set pagesize 2000
+col emp_id format 999
+col dept_id format 99
+col sal format 9999
+col ename format a5
+col hire_date FORMAT DATE
+col fir_val FORMAT a10
+col fir_val_desc FORMAT a10
+col last_val FORMAT a10
+col last_val_desc FORMAT a10
+
+
+（1）ROW_NUMBER 、RANK及DENSE_RANK
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY sal) AS row_number,
+RANK() OVER (PARTITION BY dept_id ORDER BY sal) AS rank,
+DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY sal) AS dense_rank
+FROM emp;
+
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+MIN(sal) KEEP (DENSE_RANK FIRST ORDER BY hire_date) OVER (PARTITION BY dept_id) Worst,
+MAX(sal) KEEP (DENSE_RANK LAST ORDER BY hire_date) OVER (PARTITION BY dept_id) Best
+FROM emp;
+脚本15-4　分析函数的函数部分（ROW_NUMBER 等）
+
+--------------------------------------------------------------------------------------------
+
+
+（2）FIRST_VALUE与LAST_VALUE等
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+FIRST_VALUE(ename) OVER(PARTITION BY dept_id ORDER BY sal ) AS fir_val,
+FIRST_VALUE(ename) OVER(PARTITION BY dept_id ORDER BY sal DESC) AS fir_val_desc,
+LAST_VALUE(ename) OVER(PARTITION BY dept_id ORDER BY sal ) AS last_val,
+LAST_VALUE(ename) OVER(PARTITION BY dept_id ORDER BY sal DESC) AS last_val_desc
+FROM emp;
+脚本15-5　分析函数的函数部分（FIRST_VALUE 等）
+
+--------------------------------------------------------------------------------------------
+
+
+（3）LAG与LEAD等
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+LAG(sal) OVER (ORDER BY hire_date) AS prev_sal1,
+LEAD(sal) OVER (ORDER BY hire_date) AS next_sal1,
+LAG(sal, 1, 0) OVER (ORDER BY hire_date) AS prev_sal2,
+LEAD(sal, 1,0) OVER (ORDER BY hire_date) AS next_sal2,
+LAG(sal, 1, 0) OVER (partition BY dept_id ORDER BY hire_date) AS prev_sal3,
+LEAD(sal, 1,0) OVER (partition BY dept_id ORDER BY hire_date) AS next_sal3,
+LAG(sal, 2, 999) OVER (partition BY dept_id ORDER BY hire_date) AS prev_sal4,
+LEAD(sal, 2,999) OVER (partition BY dept_id ORDER BY hire_date) AS next_sal4
+FROM emp;
+脚本15-6　分析函数的函数部分（LAG与LEAD等）
+
+--------------------------------------------------------------------------------------------
+
+3. ORDER BY部分
+准备环境：
+drop table emp purge;
+CREATE TABLE emp
+(
+emp_id    NUMBER(6),
+ename  VARCHAR2(45),
+dept_id   NUMBER(4),
+hire_date DATE,
+sal    NUMBER(8,2)
+);
+--创建emp数据
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (101, 'Tom',    20,  TO_DATE
+('21-09-1989', 'DD-MM-YYYY'), 2000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (102, 'Mike',   20,  TO_DATE
+('13-01-1993', 'DD-MM-YYYY'), 8000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (120, 'John',   50,  TO_DATE
+('18-07-1996', 'DD-MM-YYYY'), 1000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (121, 'Joy',    50,  TO_DATE
+('10-04-1997', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (122, 'Rich',   50,  NULL,
+3000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (123, 'Kate',   50,  TO_DATE
+('10-10-1997', 'DD-MM-YYYY'), 5000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (124, 'Jess',   50,  TO_DATE
+('16-11-1999', 'DD-MM-YYYY'), 6000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (100, 'Stev',   10,  TO_DATE
+('01-01-1990', 'DD-MM-YYYY'), 7000);
+COMMIT;
+ORDER BY部分的代码示例：
+set linesize 2000
+set pagesize 2000
+col emp_id format 999
+col dept_id format 99
+col ename format a5
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date) sum_sal1,
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date DESC) sum_sal2,
+SUM(sal) OVER (PARTITION BY dept_id ORDER BY hire_date DESC nulls LAST) sum_sal3,
+SUM(sal) OVER (PARTITION BY dept_id ) sum_sal4,
+SUM(sal) OVER ( ) sum_sal5
+FROM emp;
+脚本15-7　分析函数的order by 部分
+
+--------------------------------------------------------------------------------------------
+
+
+15.2.2　案例分享
+1. 排名论次
+环境准备：
+drop table emp purge;
+CREATE TABLE emp
+(
+emp_id    NUMBER(6),
+ename  VARCHAR2(45),
+dept_id   NUMBER(4),
+hire_date DATE,
+sal    NUMBER(8,2)
+);
+--创建emp数据
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (101, 'Tom',    20,  TO_DATE
+('21-09-1989', 'DD-MM-YYYY'), 2000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (102, 'Mike',   20,  TO_DATE
+('13-01-1993', 'DD-MM-YYYY'), 8000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (120, 'John',   50,  TO_DATE
+('18-07-1996', 'DD-MM-YYYY'), 1000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (121, 'Joy',    50,  TO_DATE
+('10-04-1997', 'DD-MM-YYYY'), 1000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (122, 'Rich',   50,  TO_DATE
+('01-05-1995', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (123, 'Kate',   50,  TO_DATE
+('10-10-1997', 'DD-MM-YYYY'), 4000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (124, 'Jess',   50,  TO_DATE
+('16-11-1999', 'DD-MM-YYYY'), 7000);
+INSERT INTO emp (emp_id, ename, dept_id, hire_date, sal) VALUES (100, 'Stev',   10,  TO_DATE
+('01-01-1990', 'DD-MM-YYYY'), 7000);
+COMMIT;
+set linesize 2000
+set pagesize 2000
+col emp_id format 999
+col dept_id format 99
+col sal format 9999
+col ename format a5
+col hire_date FORMAT DATE
+SELECT * from emp;
+
+--------------------------------------------------------------------------------------------
+
+
+语句1
+WITH t as
+(SELECT dept_id, min(sal) as min_sal FROM emp GROUP BY dept_id)
+select emp.emp_id, emp.ename, emp.dept_id, emp.hire_date,emp.sal
+from emp, t
+where emp.dept_id = t.dept_id
+and emp.sal = t.min_sal;
+脚本15-8　用普通SQL实现各组最低收入统计
+
+--------------------------------------------------------------------------------------------
+
+
+语句2
+Set autotrace on
+SELECT  emp_id, ename, dept_id, hire_date,sal
+FROM (SELECT emp.*,
+dense_rank() OVER(PARTITION BY dept_id ORDER BY sal ) AS  N
+FROM emp)
+WHERE N = 1;
+脚本15-9　用分析函数实现各组最低收入统计
+
+--------------------------------------------------------------------------------------------
+
+
+2. 数据去重
+环境准备：
+DROP TABLE t purge ;
+CREATE TABLE t AS SELECT * FROM dba_objects WHERE rownum<=10;
+UPDATE t SET object_id=rownum;
+UPDATE t SET object_id=3 WHERE object_id<=3;
+UPDATE t SET object_id=4 WHERE object_id>=4 AND object_id<=6;
+COMMIT;
+方法1：
+SET autotrace ON
+SET linesize 2000
+SET pagesize 2000
+delete from t
+where rowid <
+(select max(rowid) from t t2
+where t.object_id = t2.object_id
+);
+脚本15-10　数据去重的普通写法
+
+--------------------------------------------------------------------------------------------
+
+
+方法2
+delete t
+where rowid in (select rid
+from (select rowid rid,
+row_number() over(partition by object_id ORDER by created
+desc) rn
+from t)
+where rn > 1);
+脚本15-11　数据去重的分析函数写法
+
+--------------------------------------------------------------------------------------------
+
+
+3. 占比应用
+SELECT
+emp_id,ename,dept_id,hire_date,sal,
+ratio_to_report(sal) OVER () as pct1l,
+ratio_to_report(sal) OVER (partition by dept_id) as pct2
+FROM emp;
+脚本15-12　分析函数实现占比应用
+
+--------------------------------------------------------------------------------------------
+
+
+4. 连续值判定
+需求描述及环境准备：
+drop table t purge;
+create table t (id1 int,id2 int ,id3 int);
+insert into t (id1 ,id2,id3) values (1,45,89);
+insert into t (id1 ,id2,id3) values (2,45,89);
+insert into t (id1 ,id2,id3) values (3,45,89);
+insert into t (id1 ,id2,id3) values (8,45,89);
+insert into t (id1 ,id2,id3) values (12,45,89);
+insert into t (id1 ,id2,id3) values (36,45,89);
+insert into t (id1 ,id2,id3) values (22,45,89);
+insert into t (id1 ,id2,id3) values (23,45,89);
+insert into t (id1 ,id2,id3) values (89,45,89);
+insert into t (id1 ,id2,id3) values (92,45,89);
+insert into t (id1 ,id2,id3) values (91,45,89);
+insert into t (id1 ,id2,id3) values (90,45,89);
+commit;
+SQL> select * from t;
+
+--------------------------------------------------------------------------------------------
+
+
+用分析函数分步骤完成：
+select t.*,
+lag(id1,1,0) over(order by id1) av, ---构造出伪列av
+lead(id1,1,0) over(order by id1) ev ---构造出伪列ev
+from t;
+--思考中间环节（构造）
+SELECT id1,
+id2,
+id3,
+ROW_NUMBER() OVER(ORDER BY id1) - ID1 AS group_id
+FROM t
+--在构造的中间环节的基础上，实现了需求1
+SELECT id1, id2, id3
+FROM (
+SELECT id1, id2, id3, COUNT(*) OVER(PARTITION BY group_id) CNT
+FROM (
+SELECT id1,
+id2,
+id3,
+ROW_NUMBER() OVER(ORDER BY id1) - ID1 AS group_id
+FROM t
+)
+)
+WHERE CNT > 1
+ORDER BY id1;
+--同样在构造的中间环节的基础上，实现了需求2
+SELECT MIN(id1), MAX(id1), COUNT(*)
+FROM (SELECT id1,
+id2,
+id3,
+ROW_NUMBER() OVER(ORDER BY id1) - ID1 AS group_id
+FROM t)
+HAVING COUNT(*) > 1
+GROUP BY group_id
+ORDER BY 1;
+脚本15-13　分析函数实现连续值判定
+
+--------------------------------------------------------------------------------------------
+
+
+5. 高频数获取
+需求描述：
+SELECT sal,COUNT(*) repeat_num
+FROM emp
+GROUP BY sal;
+
+分析函数实现高频数获取
+SET autotrace ON
+SET linesize 1000
+SET pagesize 2000 
+SELECT sal
+FROM
+(
+SELECT sal,RANK() OVER(ORDER BY repeat_num DESC) rank_repeat_num
+FROM
+(
+SELECT sal,COUNT(*) repeat_num
+FROM emp
+GROUP BY sal
+)
+)
+WHERE rank_repeat_num=1;
+脚本15-14　分析函数实现高频数获取
+
+--------------------------------------------------------------------------------------------
+
+
+不用分析函数，写法更麻烦且性能更差，如下：
+select sal
+from (SELECT sal, COUNT(*) as repeat_num FROM emp GROUP BY sal) t
+where t.repeat_num =
+(select max(repeat_num)
+from (SELECT sal, COUNT(*) as repeat_num FROM emp GROUP BY sal));
+脚本15-15　普通写法实现高频数获取的不足之处
+
+--------------------------------------------------------------------------------------------
+
+
+6. 计费规则设计
+drop table test_rule purge;
+create table TEST_RULE
+(
+IF_jieti  number,
+SP_NAME    VARCHAR2(10),
+PRICE_TYPE NUMBER,
+SP_PARAM   NUMBER,
+TEL_PARAM  NUMBER,
+TOTAL1     NUMBER,
+TOTAL2     NUMBER
+);
+-- Add comments to the columns
+comment on column TEST_RULE.IF_JIETI
+is '用来判断是否为阶梯，0为非阶梯，1为半阶梯（不需分段算），2为全阶梯（需分段算）';
+comment on column TEST_RULE.SP_NAME
+is 'sp名';
+comment on column TEST_RULE.PRICE_TYPE
+is '分成类型（1表示比率，2为固定金额）';
+comment on column TEST_RULE.SP_PARAM
+is 'sp比率或金额';
+comment on column TEST_RULE.TEL_PARAM
+is '电信比率或金额';
+comment on column TEST_RULE.TOTAL1
+is '金额范围开始';
+comment on column TEST_RULE.TOTAL2
+is '金额范围开始';  
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (0,'a', 1, 40, 60, null, null);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (0,'b', 2, 800, null, null, null);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (1,'c', 1, 30, 70, 0, 500);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (1,'c', 1, 40, 60, 501, 1000);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (1,'c', 1, 50, 50, 1001, 2000);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (1,'c', 1, 60, 40, 2001, 9999999);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (2,'d', 2, 0, null, 0, 500);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (2,'d', 1, 40, 60, 501, 1000);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (2,'d', 1, 50, 50, 1001, 2000);
+insert into TEST_RULE (if_jieti,sP_NAME, PRICE_TYPE, SP_PARAM, TEL_PARAM, TOTAL1, TOTAL2)
+values (2,'d', 1, 60, 40, 2001, 9999999);
+commit; 
+--略去一堆字段
+drop table ticket purge;
+create table TICKET
+(
+ID_NAME     number,
+SP_NAME     VARCHAR2(10),
+TOTAL_PRICE NUMBER
+);
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (121,'a', 100);
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (222,'b', 1000);
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (387,'c', 100 );
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (645,'c', 600 );
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (555,'c', 1200);
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (987,'d', 100 );
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (333,'d', 600 );
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (221,'d', 1200);
+insert into TICKET (ID_NAME,SP_NAME, TOTAL_PRICE) values (528,'d', 5000);
+commit;
+脚本15-16　计费规则案例的环境准备
+
+--------------------------------------------------------------------------------------------
+
+（3）分步实现
+分解思路，步骤1：
+SET linesize 2000
+SET pagesize 2000
+select t.* ,LAG(total1) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1) start_val from test_rule
+t;
+脚本15-17　计费规则案例实现分解1
+
+--------------------------------------------------------------------------------------------
+
+
+步骤2：
+SELECT r.*, DECODE(LAG(total1) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1),0,1,total1) AS
+start_val
+FROM TEST_RULE r;
+脚本15-18　计费规则案例实现分解2
+
+--------------------------------------------------------------------------------------------
+
+
+步骤3：
+SELECT r.*
+,SUM((TOTAL2-start_val+1)*sp_param/100) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1) -
+(TOTAL2-start_val+1)*sp_param/100
+AS ACCUM
+FROM (SELECT r.*, DECODE(LAG(total1) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1),0,1,total1)
+AS start_val
+FROM TEST_RULE r
+) r;
+脚本15-19　计费规则案例实现分解3
+
+--------------------------------------------------------------------------------------------
+
+
+步骤4：
+WITH new_rule AS
+(SELECT r.*
+,SUM((TOTAL2-start_val+1)*sp_param/100) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1) -
+(TOTAL2-start_val+1)*sp_param/100
+AS ACCUM
+FROM (SELECT r.*, DECODE(LAG(total1) OVER (PARTITION BY SP_NAME ORDER BY TOTAL1),0,1,total1)
+AS start_val
+FROM TEST_RULE r
+) r
+)
+SELECT t.*
+,(CASE WHEN n.if_jieti =2 THEN
+(t.total_price-start_val+1)*n.sp_param/100 + n.accum
+ELSE DECODE(n.price_type,1,round(t.total_price*n.sp_param/100,2)
+,n.sp_param
+)
+END) as paid
+FROM ticket t, new_rule n
+WHERE n.sp_name = t.sp_name
+AND (if_jieti = 0 OR if_jieti>0 AND t.total_price BETWEEN n.TOTAL1 AND n.TOTAL2) ;
+脚本15-20　计费规则案例实现分解4
