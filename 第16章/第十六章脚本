@@ -1,0 +1,172 @@
+
+第16章　动手，把握需求改写让SQL飞
+
+2017-04-16 梁 运维小盆友
+16.2.1　看似等价的写法，其实不等价
+Insert多表插入的玄与机
+语句1：
+insert all
+into  ljb_tmp_transaction
+into  ljb_tmp_session
+select * from dba_objec
+语句2：
+insert  into  ljb_tmp_transaction as select * from dba_objects;
+insert  into  ljb_tmp_session as select * from dba_objects;
+脚本16-1　Insert多表插入的玄与机
+
+--------------------------------------------------------------------------------------------
+
+
+2. max及min写法的分与合
+构造环境：
+drop table t purge;
+create table t as select * from dba_objects;
+alter table t add constraint pk1_object_id primary key (OBJECT_ID);
+set autotrace on
+set linesize 1000
+语句1：
+select min(object_id),max(object_id) from t;
+语句2：
+select max(object_id) from t;
+select min(object_id) from t;
+脚本16-2　max及min写法的分与合
+
+--------------------------------------------------------------------------------------------
+
+
+3. In 和><写法之间的同与异
+构造环境：
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_object_id on t(object_id,object_type);
+UPDATE t SET OBJECT_ID=20 WHERE ROWNUM<=26000;
+UPDATE t SET OBJECT_ID=21 WHERE OBJECT_ID<>20;
+COMMIT;
+set linesize 266
+set pagesize 1
+alter session set statistics_level=all ;
+语句1：
+select  /*+index(t,idx_object_id)*/ * from t  where object_TYPE='TABLE'  AND OBJECT_ID >= 20 AND
+OBJECT_ID<= 21;
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+语句2：
+Select /*+index(t,idx_object_id)*/ * from t where object_TYPE='TABLE'  AND  OBJECT_ID IN
+(20,21);
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本16-3　In 和><写法之间的同与异
+
+--------------------------------------------------------------------------------------------
+
+
+4. count 列和*结论的对与错
+构造环境：
+drop table t purge;
+create table t as select * from dba_objects;
+create index idx_obj_id on t(object_id);
+update t set object_id =null where rownum<=2;
+set linesize 1000
+set autotrace on
+看看count(*)的写法：
+SQL> select count(*) from t;
+再看看count(列)的写法：
+SQL> select count(object_id) from t;
+脚本16-4　count 列和*结论的对与错
+
+--------------------------------------------------------------------------------------------
+
+
+16.2.2　看似不等价的写法，其实等价
+关于表是否有记录的判断：
+begin
+select count(*) into v_cnt from t1 ;
+if v_cnt>0
+then  …A逻辑…
+else
+then  …B逻辑…
+End;
+原先的SQL1 从Select count(*) from t1; 被改造为：
+Select count(*) from t1 where rownum=1;
+begin
+select count(*) into v_cnt from t1 where rownum=1;
+if v_cnt=1
+then  …A逻辑…
+else
+then  …B逻辑…
+End;
+
+--------------------------------------------------------------------------------------------
+
+16.4.1　优化过程
+1. 普通思路
+drop table t purge;
+create table t as  select * from dba_objects;
+alter table T modify OBJECT_NAME not null;
+select count(*) from t;
+set autotrace traceonly
+set linesize 1000
+set timing on
+select COUNT(*) FROM T;
+脚本16-5　Count(*)的普通思路
+
+--------------------------------------------------------------------------------------------
+
+
+试验如下：
+drop table t purge;
+create table t as  select * from dba_objects;
+alter table T modify OBJECT_NAME not null;
+create  index idx_object_name on t(object_name);
+set autotrace traceonly
+set timing on
+select count(*) from t;
+脚本16-6　Count(*)用到普通索引
+
+--------------------------------------------------------------------------------------------
+
+
+3. 六脉神剑2——位图索引风驰电掣
+试验如下：
+drop table t purge;
+create table t as  select * from dba_objects;
+Update t  Set object_name='abc';
+Update t Set object_name='evf' Where rownum<=20000;
+create bitmap index idx_object_name on t(object_name);
+set autotrace traceonly
+set timing on
+select count(*) from t;
+脚本16-7　Count(*)用到位图索引
+
+--------------------------------------------------------------------------------------------
+
+4. 六脉神剑3——物化视图蹑影追风
+DROP materialized view MV_COUNT_T;
+drop table t purge;
+create table t as  select * from dba_objects;
+Update t  Set object_name='abc';
+Update t Set object_name='evf' Where rownum<=20000;
+create  materialized view  mv_count_t
+build immediate
+refresh on commit
+enable query rewrite
+as
+select count(*) FROM T;
+set autotrace traceonly
+set linesize 1000
+select COUNT(*) FROM T;
+/
+脚本16-8　Count(*)用到物化视图
+
+--------------------------------------------------------------------------------------------
+
+
+5. 六脉神剑4——缓存结果奔逸绝尘
+drop table t purge;
+create table t as  select * from dba_objects;
+select count(*) from t;
+set linesize 1000
+set autotrace traceonly
+select /*+ result_cache */ count(*) from t;
+脚本16-9　Count(*)用到缓存结果集
+
+--------------------------------------------------------------------------------------------
+
