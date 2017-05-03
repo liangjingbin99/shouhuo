@@ -1,0 +1,407 @@
+
+
+select t.TABLE_NAME,t.NUM_ROWS,t.BLOCKS,t.LAST_ANALYZED from user_tables t  where table_name in ('T1','T2');
+select table_name,index_name,t.blevel,t.num_rows,t.leaf_blocks,t.last_analyzed from user_indexes t  where table_name in ('TEST','TEST1');
+脚本3-1　查看表和索引的统计信息
+
+--------------------------------------------------------------------------------------------
+
+--收集表统计信息
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'TEST',estimate_percent => 10,method_opt=> 'for all indexed columns') ;                                                                                                                                          
+--收集索引统计信息
+exec dbms_stats.gather_index_stats(ownname => 'LJB',indname => 'IDX_OBJECT_ID',estimate_ percent => '10',degree => '4') ;
+--收集表和索引统计信息                                                                                                                                                
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'TEST',estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+脚本3-2　收集表和索引的统计信息
+
+--------------------------------------------------------------------------------------------
+
+set autotrace off
+set linesize 1000
+drop table t_sample purge;
+create table t_sample as select * from dba_objects;
+create index idx_t_sample_objid on t_sample(object_id);
+ select num_rows, blocks, last_analyzed
+  from user_tables
+ where table_name = 'T_SAMPLE';
+ 
+ NUM_ROWS   BLOCKS   LAST_ANALYZED
+----------------------------------
+脚本3-4　新建表统计信息收集情况
+
+
+--------------------------------------------------------------------------------------------
+exec dbms_stats.gather_table_stats(ownname => 'LJB',tabname => 'T_SAMPLE',　estimate_percent => 10,method_opt=> 'for all indexed columns',cascade=>TRUE) ;
+set autotrace off
+select num_rows, blocks, last_analyzed from user_tables where table_name = 'T_SAMPLE';
+set autotrace traceonly     
+select  * from t_sample where object_id=20;
+脚本3-5　未收集统计信息会进行动态采样
+
+
+--------------------------------------------------------------------------------------------
+set linesize 1000
+set pagesize 2000
+explain plan for
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n in(18,19);
+select * from table(dbms_xplan.display());
+脚本3-7　explain plan for获取执行计划 
+
+
+--------------------------------------------------------------------------------------------
+set autotrace on 
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n in(18,19);
+脚本3-8　set autotrace on获取执行计划
+
+
+--------------------------------------------------------------------------------------------
+set autotrace off          
+alter session set statistics_level=all ;
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n in(18,19);
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本3-9　statistics_level=all获取执行计划
+
+
+
+--------------------------------------------------------------------------------------------
+步骤1： select  * from table(dbms_xplan.display_cursor('&sq_id')); （该方法是从共享池里得到）
+比如取值是1a914ws3ggfsn，带入如下：
+select * from table(dbms_xplan.display_cursor('1a914ws3ggfsn'));
+脚本3-10　dbms_xplan.display_cursor获取执行计划
+
+
+
+--------------------------------------------------------------------------------------------
+set autotace off
+alter session set statistics_level=typical;     
+alter session set events '10046 trace name context  forever,level 12';
+
+SELECT  *
+FROM t1, t2
+WHERE t1.id = t2.t1_id
+AND t1.n in(18,19);   
+脚本3-11　10046 trace 获取执行计划
+
+   
+      
+  步骤1：@?/rdbms/admin/awrsqrpt.sql
+  步骤2：选择你要的断点（begin snap 和end snap)
+  步骤3：输入你的sql_id       
+脚本3-12　awrsqrpt.sql调用获取执行计划
+
+--------------------------------------------------------------------------------------------
+
+
+SELECT deptno, count(*) 
+FROM emp WHERE job = 'CLERK' AND sal < 3000
+GROUP BY deptno;
+脚本3-13　单独型执行计划的例子 
+
+
+--------------------------------------------------------------------------------------------
+
+alter session set statistics_level=all ;
+SELECT ename FROM emp
+UNION ALL
+SELECT dname FROM dept
+UNION ALL
+SELECT '%' FROM dual;
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本3-14　联合型的非关联型
+
+
+--------------------------------------------------------------------------------------------
+
+alter session set statistics_level=all ;
+SELECT /*+ ordered use_nl(dept) index(dept) */ * FROM emp, dept WHERE emp.deptno =
+dept.deptno AND emp.comm IS NULL AND dept.dname != 'SALES';
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本3-15　联合型的关联型
+
+
+--------------------------------------------------------------------------------------------
+
+
+alter session set statistics_level=all ;
+SELECT * FROM emp WHERE NOT EXISTS (SELECT /*+ no_unnest */ 0
+     FROM dept                WHERE dept.dname = 'SALES' AND
+dept.deptno = emp.deptno) AND NOT EXISTS (SELECT /*+ no_unnest */ 0
+         FROM bonus              WHERE bonus.ename = emp.ename);
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+SELECT dname, count(*)
+FROM emp, dept
+WHERE emp.deptno = dept.deptno
+GROUP BY dname;
+
+DNAME            COUNT(*)
+-------------------------
+ACCOUNTING              3
+RESEARCH                5
+SALES                   6
+
+SELECT ename
+FROM emp
+WHERE NOT EXISTS (SELECT /*+ no_unnest */ 0 
+                    FROM dept 
+                 WHERE dept.dname = 'SALES' AND dept.deptno = emp.deptno);
+
+ENAME
+------
+SMITH
+JONES
+CLARK
+SCOTT
+KING
+ADAMS
+FORD
+MILLER
+
+已选择8行。
+脚本3-16　联合型的关联型（FILTER）
+
+--------------------------------------------------------------------------------------------
+
+alter session set statistics_level=all ;
+UPDATE emp e1 SET sal = (SELECT avg(sal) FROM emp e2 WHERE e2.deptno =
+e1.deptno),  comm = (SELECT avg(comm) FROM emp e3);
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+脚本3-17　联合型的关联型（UPDATE）
+
+--------------------------------------------------------------------------------------------
+
+alter session set statistics_level=all ;
+SELECT /*+ connect_by_filtering  */ level, rpad('-',level-1,'-')||ename
+AS ename, prior ename AS manager FROM emp START WITH mgr IS NULL
+CONNECT BY PRIOR empno = mgr;      
+SELECT * FROM table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+SELECT /*+ connect_by_filtering */ level, rpad('-',level-1,'-')||ename AS ename, prior ename AS manager
+    FROM emp
+    START WITH mgr IS NULL
+    CONNECT BY PRIOR empno = mgr;
+
+     LEVEL ENAME      MANAGER
+------------------------------
+         1 KING
+         2 -JONES     KING
+         3 --SCOTT    JONES
+         4 ---ADAMS   SCOTT
+         3 --FORD     JONES
+         4 ---SMITH   FORD
+         2 -BLAKE     KING
+         3 --ALLEN    BLAKE
+         3 --WARD     BLAKE
+         3 --MARTIN   BLAKE
+         3 --TURNER   BLAKE
+         3 --JAMES    BLAKE
+         2 -CLARK     KING
+         3 --MILLER   CLARK
+脚本3-18　联合型的关联型（CONNECT BY WITH FLITERING）
+
+--------------------------------------------------------------------------------------------
+---构造出上例的例子的脚本
+DROP TABLE t;
+CREATE TABLE t as select * from dba_objects;
+--CREATE INDEX idx ON t (object_id);
+
+alter session set statistics_level=all;
+
+set linesize 1000
+set pagesize 2000
+select * from t where object_id=6;
+
+SELECT * FROM table(dbms_xplan.display_cursor(NULL,NULL,'allstats last'));  
+脚本3-19　返回行与逻辑读比率
+
+
+
+---构造例子的脚本
+DROP TABLE t1;
+CREATE TABLE t1 (id, col1, col2, pad)
+AS 
+SELECT rownum, CASE WHEN rownum>5000 THEN 666 ELSE rownum END, rownum, lpad('*',100,'*')
+FROM dual
+CONNECT BY level <= 10000;
+INSERT INTO t1 SELECT id+10000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+20000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+40000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+80000, col1, col2, pad FROM t1;
+COMMIT;
+CREATE INDEX t1_col1 ON t1 (col1);
+DROP TABLE t2;
+CREATE TABLE t2 AS SELECT * FROM t1 WHERE mod(col2,19) != 0;
+ALTER TABLE t2 ADD CONSTRAINT t2_pk PRIMARY KEY (id);
+--以下为分析，但是故意不搜集直方图
+BEGIN
+ dbms_stats.gather_table_stats(
+   ownname=>user, 
+   tabname=>'T1', 
+   cascade=>TRUE,
+   estimate_percent=>100,
+   method_opt=>'for all columns size 1',
+   no_invalidate=>FALSE);
+END;
+/
+
+BEGIN
+ dbms_stats.gather_table_stats(
+   ownname=>user, 
+   tabname=>'T2', 
+   cascade=>TRUE,
+   estimate_percent=>100,
+   method_opt=>'for all columns size 1',
+   no_invalidate=>FALSE);
+END;
+/
+
+
+set linesize 1000
+set pagesize 2000
+explain plan for 
+SELECT  count(t2.col2)
+FROM t1 ,t2 WHERE t1.id=t2.id and t1.col1 = 666;
+select * from table(dbms_xplan.display());
+脚本3-20　评估值准确的重要性
+
+--------------------------------------------------------------------------------------------
+
+--举例说明：
+drop table t_col_type purge;
+create table t_col_type(id varchar2(20),col2 varchar2(20),col3 varchar2(20));
+insert into t_col_type select rownum,'abc','efg' from dual connect by level<=10000;
+commit;
+create index idx_id on t_col_type(id);
+set linesize 1000
+set autotrace traceonly
+select * from t_col_type where id=6;
+脚本3-21　类型转换需认真关注
+
+
+--------------------------------------------------------------------------------------------
+
+
+rop table people purge;
+create table people (first_name varchar2(200),last_name varchar2(200),sex_id number);
+
+create table sex (name varchar2(20), sex_id number);
+insert into people (first_name,last_name,sex_id) select object_name,object_type,1 from dba_objects;
+insert into sex (name,sex_id) values ('男',1);
+insert into sex (name,sex_id) values ('女',2);
+insert into sex (name,sex_id) values ('不详',3);
+commit;
+
+
+create or replace function get_sex_name(p_id sex.sex_id%type) return sex.name%type is
+v_name sex.name%type;
+begin
+select name
+into v_name
+from sex
+where sex_id=p_id;
+return v_name;
+end;
+/
+
+set linesize 1000
+set pagesize 2000
+
+set autotrace traceonly
+
+
+select sex_id,
+first_name||' '||last_name full_name,
+get_sex_name(sex_id) gender
+from people;
+脚本3-22　请小心递归调用部分
+
+
+--------------------------------------------------------------------------------------------
+
+
+DROP TABLE t1;
+CREATE TABLE t1 (id, col1, col2, pad)
+AS 
+SELECT rownum, CASE WHEN rownum>5000 THEN 666 ELSE rownum END, rownum, lpad('*',100,'*')
+FROM dual
+CONNECT BY level <= 10000;
+INSERT INTO t1 SELECT id+10000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+20000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+40000, col1, col2, pad FROM t1;
+INSERT INTO t1 SELECT id+80000, col1, col2, pad FROM t1;
+COMMIT;
+CREATE INDEX t1_col1 ON t1 (col1);
+DROP TABLE t2;
+CREATE TABLE t2 AS SELECT * FROM t1 WHERE mod(col2,19) != 0;
+ALTER TABLE t2 ADD CONSTRAINT t2_pk PRIMARY KEY (id);
+--以下为分析，但是故意不搜集直方图
+BEGIN
+ dbms_stats.gather_table_stats(
+   ownname=>user, 
+   tabname=>'T1', 
+   cascade=>TRUE,
+   estimate_percent=>100,
+   method_opt=>'for all columns size 1',
+   no_invalidate=>FALSE);
+END;
+/
+
+BEGIN
+ dbms_stats.gather_table_stats(
+   ownname=>user, 
+   tabname=>'T2', 
+   cascade=>TRUE,
+   estimate_percent=>100,
+   method_opt=>'for all columns size 1',
+   no_invalidate=>FALSE);
+END;
+/
+
+
+SELECT /*+ gather_plan_statistics */ count(t2.col2)
+FROM t1 ,t2 WHERE t1.id=t2.id and t1.col1 = 666;
+SELECT * FROM table(dbms_xplan.display_cursor(NULL,NULL,'allstats last'));
+脚本3-23　注意表的访问次数
+
+
+--------------------------------------------------------------------------------------------
+
+drop table t1 cascade constraints;
+create table t1 as select * from dba_objects;
+drop table t2 cascade constraints;
+create table t2 (id1,id2) as 
+select rownum ,rownum+100 from dual connect  by level <=1000;
+
+alter session set statistics_level=all;
+set linesize 1000
+set pagesize 2000
+
+
+select *
+  from (select t1.*, rownum as rn from t1, t2 where t1.object_id = t2.id1) a
+ where a.rn >= 1
+   and a.rn <= 10;
+SELECT * FROM table(dbms_xplan.display_cursor(NULL,NULL,'allstats last'));
+脚本3-24　注意表真实访问行数
+
+
+--------------------------------------------------------------------------------------------
+set linesize 1000
+set pagesize 2000
+drop table t purge;
+create table t as select * from dba_objects;
+
+set autotrace traceonly
+select * from t where object_id>2 order by object_id;
+脚本3-25　谨慎观察排序与否
+
+--------------------------------------------------------------------------------------------
