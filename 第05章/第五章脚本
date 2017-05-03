@@ -1,0 +1,646 @@
+
+
+第5章　且慢，感受体系结构让SQL飞
+
+
+5.2.1　与共享池相关
+1. 解析优化让第2次执行更快
+环境准备：
+drop table t purge;
+create table t as select  * from dba_objects;
+set linesize 1000
+set autotrace on 
+set timing on 
+
+--------------------------------------------------------------------------------------------
+
+第1次执行：
+SQL> select count(*) from t;
+  COUNT(*)
+
+SQL> --第2次执行
+SQL> --该命令只是为了先不考虑2次执行物理读减少带来的效果，只考虑减少解析的优化效果
+SQL> alter system flush buffer_cache;
+系统已更改。
+已用时间:  00: 00: 00.03
+SQL> select count(*) from t;
+  COUNT(*)
+脚本5-1　解析优化让第2次执行更快
+
+--------------------------------------------------------------------------------------------
+
+2. 思考绑定变量带来的性能飞跃
+SQL> begin
+  2      for i in 1 .. 100000
+  3      loop
+  4          execute immediate
+  5          'insert into t values ( '||i||')';
+  6      end loop;
+  7      commit;
+  8  end;
+  9  /  
+
+PL/SQL 过程已成功完成。
+已用时间:  00: 00: 43.50
+脚本5-2　未使用绑定变量脚本
+
+--------------------------------------------------------------------------------------------
+
+使用绑定变量：
+SQL> begin
+  2      for i in 1 .. 100000
+  3      loop
+  4          execute immediate
+  5          'insert into t values ( :x )' using i;
+  6      end loop;
+  7          commit;
+  8  end;
+  9  /
+PL/SQL 过程已成功完成。
+已用时间:  00: 00: 04.77
+脚本5-3　使用绑定变量脚本
+
+--------------------------------------------------------------------------------------------
+
+3. 体会硬解析次数和执行次数
+缺省
+
+脚本5-4　体会硬解析次数和执行次数
+
+--------------------------------------------------------------------------------------------
+
+5.2.2　数据缓冲相关
+
+1. 缓冲优化让第2次执行更快
+SQL> --第1次执行
+SQL> select count(*) from t;
+  COUNT(*)
+----------
+     72884
+已用时间:  00: 00: 00.12
+SQL> --第2次执行
+SQL> --该命令只是为了先不考虑解析的优化,单纯考虑第2次执行物理读减少带来的优化效应
+SQL> alter system flush shared_pool;
+系统已更改。
+已用时间:  00: 00: 00.11
+SQL> select count(*) from t;
+脚本5-5　缓冲优化让第二次执行更快
+
+--------------------------------------------------------------------------------------------
+
+2. 解析和缓冲优化一起来
+SQL> --第1次执行
+SQL> select count(*) from t;
+  COUNT(*)
+SQL> --第2次执行
+SQL> --这里不做 shared_pool和buffer_cache的flush
+SQL> select count(*) from t;
+  COUNT(*)
+脚本5-6　解析和缓冲优化一起来
+
+--------------------------------------------------------------------------------------------
+
+3. 直接路径读性能略胜一筹
+环境准备：
+drop table t purge;
+create table t   as select * from dba_objects;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+commit;
+测试普通插入：
+SQL> set timing off
+SQL> set autotrace off
+SQL> drop table test;
+表已删除。
+SQL> create table test   as select * from dba_objects where 1=2;
+表已创建。
+SQL> set timing on
+SQL> insert into test select * from t;
+已创建1777808行。
+已用时间:  00: 00: 14.81
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.04
+SQL> --注意这个普通方式插入试验输出的物理读（这是首次读哦）
+SQL> set autotrace traceonly
+SQL> select count(*) from test;
+已用时间:  00: 00: 00.13
+测试直接路径插入方式：
+SQL> set timing off
+SQL> drop table test;
+表已删除。
+SQL> create table test  as select * from dba_objects where 1=2;
+表已创建。
+SQL> set timing on
+SQL> insert  /*+ append */ into test select * from t;
+已创建1777808行。
+已用时间:  00: 00: 04.22
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.00
+SQL> --注意这个直接路径方式插入试验输出的物理读（这是首次读哦）
+SQL> set autotrace traceonly
+SQL> select count(*) from test;
+已用时间:  00: 00: 05.56
+脚本5-7　解析和缓冲优化一起来
+
+--------------------------------------------------------------------------------------------
+
+5.2.3　日志归档相关
+1. 批量提交与否性能差异明显
+SQL> drop table t purge;
+表已删除。
+SQL> create table t(x int);
+表已创建。
+SQL> set timing on
+SQL> begin
+  2      for i in 1 .. 100000 loop
+  3         insert into t1 values (i);
+  4        commit;
+  5      end loop;
+  6  end;
+  7  /
+PL/SQL 过程已成功完成。
+已用时间:  00: 00: 11.21
+SQL> drop table t purge;
+表已删除。
+SQL> create table t(x int);
+表已创建。
+SQL> begin
+  2      for i in 1 .. 100000  loop
+  3         insert into t values (i);
+  4      end loop;
+  5    commit;
+  6  end;
+  7  /
+PL/SQL 过程已成功完成。
+已用时间:  00: 00: 04.26
+脚本5-8　批量提交与否的性能差异
+
+--------------------------------------------------------------------------------------------
+
+2. 日志关闭与否对性能的影响
+--环境准备
+drop table t purge;
+create table t   as select * from dba_objects;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+insert into t  select * from t;
+--多插几次，让数据大一点
+insert into t  select * from t;
+insert into t  select * from t;
+commit;
+
+测试直接路径写方式：
+SQL> drop table test;
+表已删除。
+SQL> create table test  as select * from dba_objects where 1=2;
+表已创建。
+SQL> set timing on
+SQL> insert  /*+ append */ into test select * from t;
+已创建7111232行。
+已用时间:  00: 00: 23.68
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.01
+脚本5-9　直接路径写插入
+
+--------------------------------------------------------------------------------------------
+
+测试nolgging关闭日志+直接路径写方式：
+SQL> drop table test;
+表已删除。
+已用时间:  00: 00: 00.19
+SQL> create table test  as select * from dba_objects where 1=2;
+表已创建。
+已用时间:  00: 00: 00.10
+SQL> alter table test nologging;
+表已更改。
+已用时间:  00: 00: 00.05
+SQL> set timing on
+SQL> insert  /*+ append */ into test select * from t;
+已创建7111232行。
+已用时间:  00: 00: 12.08
+SQL> commit;
+提交完成。
+已用时间:  00: 00: 00.01
+脚本5-10　直接路径写加关闭日志的插入
+
+--------------------------------------------------------------------------------------------
+
+5.3　扩展优化案例
+5.3.1　与共享池相关
+构造一个未使用绑定变量并频繁执行的SQL如下：
+drop table t purge;
+create table t(x int);
+select * from v$mystat where rownum=1;
+begin
+    for i in 1 .. 100000
+    loop
+        execute immediate
+        'insert into t values ( '||i||')';
+    end loop;
+    commit;
+end;
+/
+脚本5-11　构造未使用绑定变量的SQL
+
+--------------------------------------------------------------------------------------------
+
+找出未使用绑定变量的SQL。
+drop table t_bind_sql purge;
+create table t_bind_sql as select sql_text,module from v$sqlarea;
+alter table t_bind_sql add sql_text_wo_constants varchar2(1000);
+create or replace function 
+
+remove_constants( p_query in varchar2 ) return varchar2
+as
+    l_query long;
+    l_char  varchar2(10);
+    l_in_quotes boolean default FALSE;
+begin
+    for i in 1 .. length( p_query )
+    loop
+        l_char := substr(p_query,i,1);
+        if ( l_char = '''' and l_in_quotes )
+        then
+            l_in_quotes := FALSE;
+        elsif ( l_char = '''' and NOT l_in_quotes )
+        then
+            l_in_quotes := TRUE;
+            l_query := l_query || '''#';
+        end if;
+        if ( NOT l_in_quotes ) then
+            l_query := l_query || l_char;
+        end if;
+    end loop;
+    l_query := translate( l_query, '0123456789', '@@@@@@@@@@' );
+    for i in 0 .. 8 loop
+        l_query := replace( l_query, lpad('@',10-i,'@'), '@' );
+        l_query := replace( l_query, lpad(' ',10-i,' '), ' ' );
+    end loop;
+    return upper(l_query);
+end;
+/
+update t_bind_sql set sql_text_wo_constants = remove_constants(sql_text);
+commit;
+接下来用如下方式就可以快速定位了：
+set linesize 266
+col  sql_text_wo_constants format a30
+col  module format  a30
+col  CNT format  999999
+select sql_text_wo_constants, module,count(*) CNT
+  from t_bind_sql
+ group by sql_text_wo_constants,module
+having count(*) > 100
+ order by 3 desc;
+脚本5-12　获取未使用绑定变量SQL的方法
+
+--------------------------------------------------------------------------------------------
+
+2. 怪哉，SQL的逻辑读成零
+试验如下：
+drop table t purge;
+create table t as select * from dba_objects;
+insert into t  select * from t;
+commit;
+SQL> set autotrace on
+select /*+ result_cache */ count(*) from t;
+SQL> ---接下来再次执行(居然发现逻辑读为0）：
+SQL> select /*+ result_cache */ count(*) from t;
+  COUNT(*)
+脚本5-13　缓存结果集让逻辑读为0
+
+--------------------------------------------------------------------------------------------
+
+3. 惊奇，函数的逻辑读成零
+具体构造的案例脚本如下：
+drop table t;
+CREATE TABLE T AS SELECT * FROM DBA_OBJECTS;
+CREATE OR REPLACE FUNCTION F_NO_RESULT_CACHE RETURN NUMBER AS
+V_RETURN NUMBER;
+BEGIN
+SELECT COUNT(*) INTO V_RETURN FROM T;
+RETURN V_RETURN;
+END;
+/
+SQL> --看调用F_NO_RESULT_CACHE执行第2次后的结果
+SQL> SELECT F_NO_RESULT_CACHE FROM DUAL;
+F_NO_RESULT_CACHE
+SQL> --看调用F_RESULT_CACHE执行第2次后的结果
+SQL> SELECT F_RESULT_CACHE FROM DUAL;
+脚本5-14　缓存函数结果集让函数逻辑读为0
+
+--------------------------------------------------------------------------------------------
+
+5.3.2　数据缓冲相关
+1. 感谢，keep让SQL跑更快
+未固定时的情况：
+SQL> alter system set db_keep_cache_size=100M;
+系统已更改。
+SQL> drop table t;
+表已删除。
+SQL> create table t as select * from dba_objects;
+表已创建。
+SQL> create index idx_object_id on t(object_id);
+索引已创建。
+SQL> select BUFFER_POOL from user_tables where  TABLE_NAME='T';
+BUFFER_
+-------
+DEFAULT
+SQL> select BUFFER_POOL from user_indexes where INDEX_NAME='IDX_OBJECT_ID';
+BUFFER_
+-------
+DEFAULT
+脚本5-15　未固定缓存的情况
+
+脚本5-15　未固定缓存的情况
+SQL> alter index idx_object_id storage(buffer_pool keep);
+索引已更改。
+SQL> --以下将索引全部读进内存
+SQL> select /*+index(t,idx_object_id)*/ count(*) from t where object_id is not null;
+  COUNT(*)
+----------
+   111113
+SQL> --以下将数据全部读进内存
+SQL> alter table t storage(buffer_pool keep);
+表已更改。
+SQL> select /*+full(t)*/ count(*) from  t;
+  COUNT(*)
+----------
+   111113
+SQL> --执行KEEP操作后，通过如下方法查询出BUFFER_POOL列值为KEEP,表示已经KEEP成功了
+SQL> select BUFFER_POOL from user_tables where  TABLE_NAME='T';
+BUFFER_
+-------
+KEEP
+SQL> select BUFFER_POOL from user_indexes where INDEX_NAME='IDX_OBJECT_ID';
+BUFFER_
+-------
+KEEP
+脚本5-16　固定缓存的情况
+
+--------------------------------------------------------------------------------------------
+
+2. 细致，查系统各维度规律
+脚本如下：
+select s.snap_date,
+       decode(s.redosize, null, '--shutdown or end--', s.currtime) "TIME",
+       to_char(round(s.seconds/60,2)) "elapse(min)",
+       round(t.db_time / 1000000 / 60, 2) "DB time(min)",
+       s.redosize redo,
+       round(s.redosize / s.seconds, 2) "redo/s",
+       s.logicalreads logical,
+       round(s.logicalreads / s.seconds, 2) "logical/s",
+       physicalreads physical,
+       round(s.physicalreads / s.seconds, 2) "phy/s",
+       s.executes execs,
+       round(s.executes / s.seconds, 2) "execs/s",
+       s.parse,
+       round(s.parse / s.seconds, 2) "parse/s",
+       s.hardparse,
+       round(s.hardparse / s.seconds, 2) "hardparse/s",
+       s.transactions trans,
+       round(s.transactions / s.seconds, 2) "trans/s"
+  from (select curr_redo - last_redo redosize,
+               curr_logicalreads - last_logicalreads logicalreads,
+               curr_physicalreads - last_physicalreads physicalreads,
+               curr_executes - last_executes executes,
+               curr_parse - last_parse parse,
+               curr_hardparse - last_hardparse hardparse,
+               curr_transactions - last_transactions transactions,
+               round(((currtime + 0) - (lasttime + 0)) * 3600 * 24, 0) seconds,
+               to_char(currtime, 'yy/mm/dd') snap_date,
+               to_char(currtime, 'hh24:mi') currtime,
+               currsnap_id endsnap_id,
+               to_char(startup_time, 'yyyy-mm-dd hh24:mi:ss') startup_time
+          from (select a.redo last_redo,
+                       a.logicalreads last_logicalreads,
+                       a.physicalreads last_physicalreads,
+                       a.executes last_executes,
+                       a.parse last_parse,
+                       a.hardparse last_hardparse,
+                       a.transactions last_transactions,
+                       lead(a.redo, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_redo,
+                       lead(a.logicalreads, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_logicalreads,
+                       lead(a.physicalreads, 1, null) over(partition by b.startup_ time order by b.end_interval_time) curr_physicalreads,
+                       lead(a.executes, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_executes,
+                       lead(a.parse, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_parse,
+                       lead(a.hardparse, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_hardparse,
+                       lead(a.transactions, 1, null) over(partition by b.startup_time order by b.end_interval_time) curr_transactions,
+                       b.end_interval_time lasttime,
+                       lead(b.end_interval_time, 1, null) over(partition by b.startup_ time order by b.end_interval_time) currtime,
+                       lead(b.snap_id, 1, null) over(partition by b.startup_time order by b.end_interval_time) currsnap_id,
+                       b.startup_time
+                  from (select snap_id,
+                               dbid,
+                               instance_number,
+                               sum(decode(stat_name, 'redo size', value, 0)) redo,
+                               sum(decode(stat_name,
+                                          'session logical reads',
+                                          value,
+                                          0)) logicalreads,
+                               sum(decode(stat_name,
+                                          'physical reads',
+                                          value,
+                                          0)) physicalreads,
+                               sum(decode(stat_name, 'execute count', value, 0)) executes,
+                               sum(decode(stat_name,
+                                          'parse count (total)',
+                                          value,
+                                          0)) parse,
+                               sum(decode(stat_name,
+                                          'parse count (hard)',
+                                          value,
+                                          0)) hardparse,
+                               sum(decode(stat_name,
+                                          'user rollbacks',
+                                          value,
+                                          'user commits',
+                                          value,
+                                          0)) transactions
+                          from dba_hist_sysstat
+                         where stat_name in
+                               ('redo size',
+                                'session logical reads',
+                                'physical reads',
+                                'execute count',
+                                'user rollbacks',
+                                'user commits',
+                                'parse count (hard)',
+                                'parse count (total)')
+                         group by snap_id, dbid, instance_number) a,
+                       dba_hist_snapshot b
+                 where a.snap_id = b.snap_id
+                   and a.dbid = b.dbid
+                   and a.instance_number = b.instance_number
+                 order by end_interval_time)) s,
+       (select lead(a.value, 1, null) over(partition by b.startup_time order by b.end_interval_time) - a.value db_time,
+               lead(b.snap_id, 1, null) over(partition by b.startup_time order by b.end_interval_time) endsnap_id
+          from dba_hist_sys_time_model a, dba_hist_snapshot b
+         where a.snap_id = b.snap_id
+           and a.dbid = b.dbid
+           and a.instance_number = b.instance_number
+           and a.stat_name = 'DB time') t
+ where s.endsnap_id = t.endsnap_id
+ order by  s.snap_date ,time desc;
+脚本5-17　查询数据库分时段的健康状况
+
+--------------------------------------------------------------------------------------------
+
+5.3.3　日志归档相关
+1. 巧妙，逮到提交过频语句
+drop table t purge;
+create table t(x int);
+select * from v$mystat where rownum=1;
+begin
+    for i in 1 .. 100000 loop
+       insert into t values (i); 
+
+      commit;  
+
+    end loop;
+end;
+/
+
+ 获取提交次数超过一个阈值的SID。
+SQL>  select t1.sid, t1.value, t2.name
+  2     from v$sesstat t1, v$statname t2
+  3    where t2.name like '%user commits%'
+  4      and t1.STATISTIC# = t2.STATISTIC#
+  5      and value >= 10000
+  6    order by value desc;
+ 获取到对应的Sql_id。
+SQL>   select t.SID,
+  2           t.PROGRAM,
+  3              t.EVENT,
+  4           t.LOGON_TIME,
+  5           t.WAIT_TIME,
+  6           t.SECONDS_IN_WAIT,
+  7           t.SQL_ID,
+  8           t.PREV_SQL_ID
+  9     from v$session t
+ 10    where sid in(132);
+通过Sql_id得到对应的SQL。
+SQL>   select t.sql_id,
+  2           t.sql_text,
+  3           t.EXECUTIONS,
+  4           t.FIRST_LOAD_TIME,
+  5           t.LAST_LOAD_TIME
+  6    from v$sqlarea t
+  7   where sql_id in ('ccpn5c32bmfmf');
+脚本5-18　如何捕获提交过于频繁的语句
+
+--------------------------------------------------------------------------------------------
+
+2. 规律，日志切换有据可查
+SELECT SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH:MI:SS'),1,5) Day,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'00',1,0)) H00,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'01',1,0)) H01, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'02',1,0)) H02,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'03',1,0)) H03,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'04',1,0)) H04,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'05',1,0)) H05,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'06',1,0)) H06,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'07',1,0)) H07,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'08',1,0)) H08,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'09',1,0)) H09,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'10',1,0)) H10,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'11',1,0)) H11, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'12',1,0)) H12,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'13',1,0)) H13, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'14',1,0)) H14,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'15',1,0)) H15, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'16',1,0)) H16, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'17',1,0)) H17, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'18',1,0)) H18, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'19',1,0)) H19, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'20',1,0)) H20, 
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'21',1,0)) H21,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'22',1,0)) H22 ,
+       SUM(DECODE(SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH24:MI:SS'),10,2),'23',1,0)) H23, 
+       COUNT(*) TOTAL 
+FROM v$log_history  a  
+   where first_time>=to_char(sysdate-11)
+GROUP BY SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH:MI:SS'),1,5) 
+ORDER BY SUBSTR(TO_CHAR(first_time, 'MM/DD/RR HH:MI:SS'),1,5) DESC;
+脚本5-19　查询日志切换规律的语句
+
+--------------------------------------------------------------------------------------------
+
+3. 迷案，跟踪日志暴增故障
+脚本如下：
+--1、redo大量产生必然是由于大量产生"块改变"。从awr视图中找出"块改变"最多的segments。
+select * from (
+SELECT to_char(begin_interval_time, 'YYYY_MM_DD HH24:MI') snap_time,
+       dhsso.object_name,
+       SUM(db_block_changes_delta)
+  FROM dba_hist_seg_stat     dhss,
+       dba_hist_seg_stat_obj dhsso,
+       dba_hist_snapshot     dhs
+ WHERE dhs.snap_id = dhss. snap_id
+   AND dhs.instance_number = dhss. instance_number
+   AND dhss.obj# = dhsso. obj#
+   AND dhss.dataobj# = dhsso.dataobj#
+   AND begin_interval_time> sysdate - 60/1440
+ GROUP BY to_char(begin_interval_time, 'YYYY_MM_DD HH24:MI'),
+          dhsso.object_name
+ order by 3 desc)
+ where rownum<=5;
+
+--------------------------------------------------------------------------------------------
+
+--2、从awr视图中找出步骤1中排序靠前的对象涉及到的SQL。
+SELECT to_char(begin_interval_time, 'YYYY_MM_DD HH24:MI'),
+       dbms_lob.substr(sql_text, 4000, 1),
+       dhss.instance_number,
+       dhss.sql_id,
+       executions_delta,
+       rows_processed_delta
+  FROM dba_hist_sqlstat dhss, dba_hist_snapshot dhs, dba_hist_sqltext dhst
+ WHERE UPPER(dhst.sql_text) LIKE '%这里写对象名大写%'
+   AND dhss.snap_id = dhs.snap_id
+   AND dhss.instance_Number = dhs.instance_number
+   AND dhss.sql_id = dhst.sql_id;
+
+--------------------------------------------------------------------------------------------
+
+--3、从ASH相关视图中找出执行这些SQL的session、module和machine。
+select * from dba_hist_active_sess_history WHERE sql_id = '';
+select * from v$active_session_history where sql_Id = '';
+
+--------------------------------------------------------------------------------------------
+
+--4. dba_source 看看是否有存储过程包含这个SQL
+
+--以下操作产生大量的redo,可以用上述的方法跟踪它们。
+drop table   test_redo  purge;
+create table test_redo as select * from dba_objects;
+insert into  test_redo select * from test_redo;
+insert into  test_redo select * from test_redo;
+insert into  test_redo select * from test_redo;
+insert into  test_redo select * from test_redo;
+insert into  test_redo select * from test_redo;
+exec dbms_workload_repository.create_snapshot();
+
+--------------------------------------------------------------------------------------------
+
+解决过程
+--执行了大量的针对test_redo表的INSERT操作后，我们开始按如下方法进行跟踪，看能否发现更新的是哪张表，是哪些语句。
+SQL> select * from (
+  2  SELECT to_char(begin_interval_time, 'YYYY_MM_DD HH24:MI') snap_time,dhsso.object_ name,SUM(db_block_changes_delta)
+  3    FROM dba_hist_seg_stat dhss,dba_hist_seg_stat_obj dhsso,dba_hist_snapshot  dhs
+  4   WHERE dhs.snap_id = dhss. snap_id
+  5     AND dhs.instance_number = dhss. instance_number AND dhss.obj# = dhsso. obj# AND dhss.dataobj# = dhsso.dataobj#
+  6     AND begin_interval_time> sysdate - 60/1440
+  7   GROUP BY to_char(begin_interval_time, 'YYYY_MM_DD HH24:MI'), dhsso.object_name order by 3 desc) 
+
+  8  where rownum<=3;
+SQL> SELECT to_char(begin_interval_time,'YYYY_MM_DD HH24:MI'),dbms_lob.substr(sql_ text,4000,1),dhss.sql_id,executions_delta,rows_processed_delta
+  2    FROM dba_hist_sqlstat dhss, dba_hist_snapshot dhs, dba_hist_sqltext dhst
+  3   WHERE UPPER(dhst.sql_text) LIKE '%TEST_REDO%' AND dhss.snap_id = dhs.snap_id 
+
+  4    AND dhss.instance_Number = dhs.instance_number AND dhss.sql_id = dhst.sql_id;
