@@ -1,6 +1,6 @@
 
-### gitbub地址
-[gitbub收获不止项目](https://github.com/liangjingbin99/shouhuo)
+### github地址
+[github收获不止项目](https://github.com/liangjingbin99/shouhuo)
 
 ### 网盘链接
 
